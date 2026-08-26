@@ -192,7 +192,12 @@ function agentToolToProto(tool: Loose): InferenceAgentTool {
   const proto = new InferenceAgentTool({
     name: tool.name,
     description: tool.description,
-    parameters: Struct.fromJsonString(JSON.stringify(tool.parameters)),
+    // A tool with no parameter schema leaves `tool.parameters` undefined;
+    // JSON.stringify(undefined) is `undefined`, which fromJsonString then tries
+    // to parse as the literal string "undefined" and throws "cannot decode
+    // google.protobuf.Struct from JSON: undefined is not valid JSON". Default to
+    // an empty schema so a schema-less tool serializes to an empty Struct.
+    parameters: Struct.fromJsonString(JSON.stringify(tool.parameters ?? {})),
   });
   if (tool.customToolFormat) proto.customToolFormat = new InferenceCustomToolFormat(tool.customToolFormat);
   return proto;
