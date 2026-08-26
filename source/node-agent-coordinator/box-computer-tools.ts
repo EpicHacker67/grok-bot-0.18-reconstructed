@@ -90,27 +90,22 @@ async function computerShell(args: Record<string, unknown>): Promise<McpToolResu
   return textResult(`${header}${body}`, result.code !== 0);
 }
 
-// Chrome/Chromium crash in this box (x86 Chrome's GPU + crashpad subprocesses
-// die under qemu emulation on Apple Silicon), but Firefox (Gecko) renders fine.
-// Firefox is installed on demand because the container is recreated from a fresh
-// image; the first browse in a new box pays a one-time install.
-let firefoxReady = false;
-async function ensureFirefox(): Promise<{ readonly ok: boolean; readonly detail: string }> {
-  if (firefoxReady) return { ok: true, detail: "" };
-  const present = await runDockerExec([LOCAL_DOCKER_BOX_CONTAINER, "bash", "-lc", "command -v firefox-esr"], 8_000);
-  if (present.code === 0) { firefoxReady = true; return { ok: true, detail: "" }; }
-  const install = await runDockerExec([LOCAL_DOCKER_BOX_CONTAINER, "bash", "-lc", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq firefox-esr"], 240_000);
-  if (install.code === 0) { firefoxReady = true; return { ok: true, detail: "" }; }
-  return { ok: false, detail: install.stderr || "apt-get install firefox-esr failed" };
-}
+// Chrome (pre-installed in the box) renders once Docker runs the x86 image
+// under Rosetta on Apple Silicon; under plain qemu its GPU/crashpad subprocess
+// dies. It is launched directly with a minimal, known-good flag set — the box's
+// own box-chrome wrapper adds WebGL/GPU flags that still crash it. A persistent
+// per-agent profile keeps cookies/sessions across opens, and a second launch
+// with the same profile opens the URL as a new tab in the running instance.
+const CHROME_PROFILE = "/home/box/agent-chrome";
+const CHROME_FLAGS = "--no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --password-store=basic --start-maximized";
 
-// Poll until a visible Firefox window exists, so the tool only reports success
-// once the browser is actually on screen (the first launch in a fresh box can
-// take a while under qemu, especially right after installing Firefox).
-async function waitForFirefoxWindow(timeoutMs: number): Promise<boolean> {
+// Poll until a visible Chrome window exists, so the tool only reports success
+// once the browser is actually on screen (the first launch in a fresh box takes
+// a little while, even under Rosetta).
+async function waitForChromeWindow(timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   do {
-    const found = await displayExec(["bash", "-lc", "xdotool search --onlyvisible --class firefox 2>/dev/null | head -1"], 5_000);
+    const found = await displayExec(["bash", "-lc", "xdotool search --onlyvisible --class chrome 2>/dev/null | head -1"], 5_000);
     if (found.stdout.toString().trim().length > 0) return true;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   } while (Date.now() < deadline);
@@ -120,16 +115,16 @@ async function waitForFirefoxWindow(timeoutMs: number): Promise<boolean> {
 async function computerOpenUrl(args: Record<string, unknown>): Promise<McpToolResult> {
   const url = typeof args.url === "string" ? args.url.trim() : "";
   if (!/^https?:\/\//i.test(url)) return textResult("computer_open_url requires an http(s) 'url'.", true);
-  const firefox = await ensureFirefox();
-  if (!firefox.ok) return textResult(`Could not prepare a browser in the box: ${firefox.detail}`, true);
-  // Pass the URL as $0 so it is never shell-interpolated. Default (remote) mode
-  // reuses a running Firefox as a new tab, or launches one otherwise.
-  await displayExec(["bash", "-lc", 'setsid firefox-esr "$0" >/dev/null 2>&1 < /dev/null & disown', url], 20_000);
-  const visible = await waitForFirefoxWindow(45_000);
-  if (!visible) return textResult(`Launched Firefox for ${url}, but its window hasn't appeared yet. Take a computer_screenshot in a few seconds to check.`, false);
+  const present = await runDockerExec([LOCAL_DOCKER_BOX_CONTAINER, "bash", "-lc", "command -v google-chrome"], 8_000);
+  if (present.code !== 0) return textResult("Chrome is not available in this box.", true);
+  // Pass the URL as $0 so it is never shell-interpolated. A running Chrome with
+  // this profile opens the URL as a new tab; otherwise a window is launched.
+  await displayExec(["bash", "-lc", `setsid google-chrome ${CHROME_FLAGS} --user-data-dir=${CHROME_PROFILE} "$0" >/dev/null 2>&1 < /dev/null & disown`, url], 20_000);
+  const visible = await waitForChromeWindow(45_000);
+  if (!visible) return textResult(`Launched Chrome for ${url}, but its window hasn't appeared yet. Take a computer_screenshot in a few seconds to check.`, false);
   // Give the page a moment to paint before the agent screenshots it.
   await new Promise((resolve) => setTimeout(resolve, 2_000));
-  return textResult(`Opened ${url} in Firefox on the box and its window is visible. Use computer_screenshot to see the page.`);
+  return textResult(`Opened ${url} in Chrome on the box and its window is visible. Use computer_screenshot to see the page.`);
 }
 
 async function computerScreenshot(): Promise<McpToolResult> {
@@ -169,7 +164,7 @@ const DEFINITIONS: readonly (McpToolDefinition & { readonly run: (args: Record<s
   },
   {
     name: "computer_open_url",
-    description: "Open a URL in a real browser (Firefox) on the box's desktop. Then use computer_screenshot to see the page and computer_click/type/key to interact with it.",
+    description: "Open a URL in Chrome on the box's desktop. Then use computer_screenshot to see the page and computer_click/type/key to interact with it.",
     inputSchema: { type: "object", properties: { url: { type: "string", description: "An http(s) URL to open." } }, required: ["url"], additionalProperties: false },
     run: computerOpenUrl,
   },
@@ -201,9 +196,6 @@ const DEFINITIONS: readonly (McpToolDefinition & { readonly run: (args: Record<s
 
 export function createBoxComputerTools(): BoxComputerTools {
   const byName = new Map(DEFINITIONS.map((definition) => [definition.name, definition]));
-  // Pre-warm the browser install so the agent's first computer_open_url is fast
-  // rather than paying the one-time apt install inside a tool call.
-  void ensureFirefox().catch(() => {});
   return {
     list: () => DEFINITIONS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
     call: async (name, args) => {
