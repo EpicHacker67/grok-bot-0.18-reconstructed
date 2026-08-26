@@ -104,6 +104,19 @@ async function ensureFirefox(): Promise<{ readonly ok: boolean; readonly detail:
   return { ok: false, detail: install.stderr || "apt-get install firefox-esr failed" };
 }
 
+// Poll until a visible Firefox window exists, so the tool only reports success
+// once the browser is actually on screen (the first launch in a fresh box can
+// take a while under qemu, especially right after installing Firefox).
+async function waitForFirefoxWindow(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const found = await displayExec(["bash", "-lc", "xdotool search --onlyvisible --class firefox 2>/dev/null | head -1"], 5_000);
+    if (found.stdout.toString().trim().length > 0) return true;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  } while (Date.now() < deadline);
+  return false;
+}
+
 async function computerOpenUrl(args: Record<string, unknown>): Promise<McpToolResult> {
   const url = typeof args.url === "string" ? args.url.trim() : "";
   if (!/^https?:\/\//i.test(url)) return textResult("computer_open_url requires an http(s) 'url'.", true);
@@ -112,7 +125,11 @@ async function computerOpenUrl(args: Record<string, unknown>): Promise<McpToolRe
   // Pass the URL as $0 so it is never shell-interpolated. Default (remote) mode
   // reuses a running Firefox as a new tab, or launches one otherwise.
   await displayExec(["bash", "-lc", 'setsid firefox-esr "$0" >/dev/null 2>&1 < /dev/null & disown', url], 20_000);
-  return textResult(`Opened ${url} in Firefox on the box. Wait a couple of seconds, then use computer_screenshot to see the page.`);
+  const visible = await waitForFirefoxWindow(45_000);
+  if (!visible) return textResult(`Launched Firefox for ${url}, but its window hasn't appeared yet. Take a computer_screenshot in a few seconds to check.`, false);
+  // Give the page a moment to paint before the agent screenshots it.
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  return textResult(`Opened ${url} in Firefox on the box and its window is visible. Use computer_screenshot to see the page.`);
 }
 
 async function computerScreenshot(): Promise<McpToolResult> {
