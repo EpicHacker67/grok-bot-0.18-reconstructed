@@ -61,12 +61,17 @@ await cp(builtAsarUnpacked, packagedUnpacked, {
 // The reconstructed bundle carries its own identity, including its own icon;
 // the inherited runtime icon belongs to the reference app only.
 await cp(reconstructedIcon, path.join(resources, "icon.icns"));
+// The inherited Assets.car is a compiled asset catalog that still contains the
+// upstream "AppIcon". Modern macOS prefers an asset-catalog AppIcon over a loose
+// CFBundleIconFile even when CFBundleIconName is absent, so it must be removed
+// for the reconstructed icon.icns to win. The Electron renderer's own assets live
+// in app.asar, not here, so dropping this catalog does not affect the UI.
+await rm(path.join(resources, "Assets.car"), { force: true });
 
 const infoPlist = path.join(outputApp, "Contents", "Info.plist");
 await run(SYSTEM_TOOLS.plutil, ["-remove", "ElectronAsarIntegrity", infoPlist]);
-// The inherited Assets.car still holds the upstream icon, and CFBundleIconName
-// makes macOS prefer it over icon.icns. Drop the key so the reconstructed
-// bundle's own icon.icns (CFBundleIconFile) is authoritative.
+// CFBundleIconName also makes macOS prefer a catalog icon; drop it so the
+// reconstructed bundle's own icon.icns (CFBundleIconFile) is authoritative.
 await run(SYSTEM_TOOLS.plutil, ["-remove", "CFBundleIconName", infoPlist]);
 await run(SYSTEM_TOOLS.plutil, ["-replace", "CFBundleIdentifier", "-string", reconstructedBundleId, infoPlist]);
 await run(SYSTEM_TOOLS.plutil, ["-replace", "CFBundleDisplayName", "-string", reconstructedName, infoPlist]);
