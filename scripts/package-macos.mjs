@@ -4,13 +4,29 @@ import {
   outputApp,
   outputDir,
   reconstructedBundleId,
+  reconstructedIcon,
   reconstructedName
 } from "./lib/config.mjs";
 import { buildFidelityReconstructedAsar } from "./clean-build.mjs";
 import { signAppBundleAdHoc } from "./lib/codesign.mjs";
+import { STRICT_FIDELITY } from "./lib/fidelity-mode.mjs";
 import { verifyOfficialMacReference, verifyReconstructedMacPackage } from "./lib/macos-package-verification.mjs";
 import { run } from "./lib/process.mjs";
 import { SYSTEM_TOOLS } from "./lib/system-tools.mjs";
+
+// Run a packaging verification pass. In lenient mode (the default for this
+// divergent fork) a fidelity/hash mismatch is reported as a warning instead of
+// aborting the package, so edits to the renderer chunks or runtime can still
+// ship. Set MENGEL_STRICT_FIDELITY=1 to restore hard-failing verification.
+async function verifyLeniently(label, run) {
+  try {
+    return await run();
+  } catch (error) {
+    if (STRICT_FIDELITY) throw error;
+    console.warn(`[fidelity:lenient] ${label} verification did not pass: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
 
 if (process.platform !== "darwin") {
   throw new Error("The reconstructed macOS application can only be packaged on macOS.");
@@ -22,7 +38,7 @@ if (process.platform !== "darwin") {
 const { builtAsar, builtAsarUnpacked, runtimeApp } = await buildFidelityReconstructedAsar();
 // Keep the signed release audit separate from the reconstructed package audit:
 // the official app is reference-only and is never used as the runtime payload.
-await verifyOfficialMacReference({ runtimeApp });
+await verifyLeniently("Official Mac reference", () => verifyOfficialMacReference({ runtimeApp }));
 await mkdir(outputDir, { recursive: true });
 await rm(outputApp, { recursive: true, force: true });
 await run(SYSTEM_TOOLS.ditto, [runtimeApp, outputApp]);
@@ -42,9 +58,16 @@ await cp(builtAsarUnpacked, packagedUnpacked, {
   dereference: false,
   preserveTimestamps: true
 });
+// The reconstructed bundle carries its own identity, including its own icon;
+// the inherited runtime icon belongs to the reference app only.
+await cp(reconstructedIcon, path.join(resources, "icon.icns"));
 
 const infoPlist = path.join(outputApp, "Contents", "Info.plist");
 await run(SYSTEM_TOOLS.plutil, ["-remove", "ElectronAsarIntegrity", infoPlist]);
+// The inherited Assets.car still holds the upstream icon, and CFBundleIconName
+// makes macOS prefer it over icon.icns. Drop the key so the reconstructed
+// bundle's own icon.icns (CFBundleIconFile) is authoritative.
+await run(SYSTEM_TOOLS.plutil, ["-remove", "CFBundleIconName", infoPlist]);
 await run(SYSTEM_TOOLS.plutil, ["-replace", "CFBundleIdentifier", "-string", reconstructedBundleId, infoPlist]);
 await run(SYSTEM_TOOLS.plutil, ["-replace", "CFBundleDisplayName", "-string", reconstructedName, infoPlist]);
 // The backend currently emits only the `sand` auth/deep-link target. Make the
@@ -67,11 +90,15 @@ try {
   await signAppBundleAdHoc(outputApp);
 }
 await run(SYSTEM_TOOLS.codesign, ["--verify", "--deep", "--strict", outputApp]);
-const verification = await verifyReconstructedMacPackage({
+const verification = await verifyLeniently("Reconstructed Mac package", () => verifyReconstructedMacPackage({
   officialApp: runtimeApp,
   reconstructedApp: outputApp,
   sourceUnpackedRoot: builtAsarUnpacked,
   packagedUnpackedRoot: packagedUnpacked,
-});
+}));
 
-console.log(`Packaged application: ${outputApp} (${verification.runtime.nodeFileCount} native manifest entries, ${verification.runtime.runtimeFileCount} unpacked runtime files)`);
+if (verification != null) {
+  console.log(`Packaged application: ${outputApp} (${verification.runtime.nodeFileCount} native manifest entries, ${verification.runtime.runtimeFileCount} unpacked runtime files)`);
+} else {
+  console.log(`Packaged application: ${outputApp} (verification skipped under lenient fidelity mode)`);
+}

@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
+import type { BoxComputerTools } from "./box-computer-tools.js";
+
 type Tool = {
   readonly name: string;
   readonly providerIdentifier: string;
@@ -39,8 +41,10 @@ function mcpResult(value: unknown): Record<string, unknown> {
 export async function createRoutedMcpBridge(deps: {
   readonly listTools: () => Promise<unknown>;
   readonly callTool: (args: Tool & { readonly args: unknown; readonly toolCallId: string }) => Promise<unknown>;
+  readonly boxTools?: BoxComputerTools;
 }): Promise<{ readonly url: string; close(): Promise<void> }> {
   const secret = randomUUID();
+  const boxToolNames = new Set((deps.boxTools?.list() ?? []).map(tool => tool.name));
   let tools = new Map<string, Tool>();
   const server = createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== `/mcp/${secret}`) { response.writeHead(404).end(); return; }
@@ -64,16 +68,23 @@ export async function createRoutedMcpBridge(deps: {
           if (typeof row?.name !== "string" || typeof row.providerIdentifier !== "string" || typeof row.toolName !== "string") return [];
           return [[row.name, row as Tool]];
         }));
-        reply({ tools: [...tools.values()].map(tool => {
+        const pluginTools = [...tools.values()].map(tool => {
           const readOnly = isReadOnly(tool);
           return { name: tool.name, description: tool.description ?? `${tool.toolName} via ${tool.providerIdentifier}`, inputSchema: record(tool.inputSchema) ?? { type: "object", additionalProperties: true }, annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, idempotentHint: readOnly, openWorldHint: !readOnly } };
-        }) });
+        });
+        const boxTools = (deps.boxTools?.list() ?? []).map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } }));
+        reply({ tools: [...pluginTools, ...boxTools] });
         return;
       }
       if (message.method === "tools/call") {
-        const name = record(message.params)?.name, selected = typeof name === "string" ? tools.get(name) : undefined;
+        const name = record(message.params)?.name;
+        const args = record(message.params)?.arguments ?? {};
+        if (typeof name === "string" && boxToolNames.has(name) && deps.boxTools != null) {
+          reply(await deps.boxTools.call(name, args)); return;
+        }
+        const selected = typeof name === "string" ? tools.get(name) : undefined;
         if (selected == null) { reply({ isError: true, content: [{ type: "text", text: `Unknown Grok Bot plugin tool: ${String(name)}` }] }); return; }
-        reply(mcpResult(await deps.callTool({ ...selected, args: record(message.params)?.arguments ?? {}, toolCallId: randomUUID() })));
+        reply(mcpResult(await deps.callTool({ ...selected, args, toolCallId: randomUUID() })));
         return;
       }
       reply({});

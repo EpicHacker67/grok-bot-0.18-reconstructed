@@ -24,7 +24,7 @@ export const outputDir = path.join(repoRoot, "dist");
 const configuredOutputName = process.env.GROK_BOT_OUTPUT_APP_NAME?.trim();
 export const outputApp = path.join(
   outputDir,
-  configuredOutputName ? path.basename(configuredOutputName) : "Grok Bot 0.18 Reconstructed.app"
+  configuredOutputName ? path.basename(configuredOutputName) : "Mengel.app"
 );
 export const fidelityOutputApp = path.join(outputDir, "Grok Bot 0.18 Fidelity.app");
 export const fidelityOutputAppForAsarHash = asarHash => {
@@ -40,7 +40,8 @@ export const devProfileDir = path.join(cacheDir, "dev-profile");
 
 export const upstreamVersion = "0.18.0";
 export const reconstructedBundleId = "com.anysphere.sand.reconstructed";
-export const reconstructedName = "Grok Bot 0.18 Reconstructed";
+export const reconstructedName = "Mengel";
+export const reconstructedIcon = path.join(repoRoot, "resources", "app-icon", "icon.icns");
 export const fidelityBundleId = "com.anysphere.sand.reconstructed.fidelity";
 export const fidelityName = "Grok Bot 0.18 Fidelity";
 export const dmgUrl = "https://downloads.cursor.com/grokbot/stable/darwin-arm64/0.18.0/Grok_Bot_0.18.0.dmg";

@@ -42,6 +42,18 @@ function replaceExactlyOnce(source, before, after, label) {
   return source.slice(0, first) + after + source.slice(first + before.length);
 }
 
+// Product rebrand: every user-facing "Grok Bot" display string becomes "Mengel"
+// across the shipped renderer chunks (wordmark, About box, onboarding, computer
+// and access copy). Internal identifiers are unaffected because they use the
+// lowercase "grokbot" token or the "sand" prefix, neither of which contains the
+// exact "Grok Bot" (capitalized, space-separated) sequence replaced here.
+const PRODUCT_NAME_BEFORE = "Grok Bot";
+const PRODUCT_NAME_AFTER = "Mengel";
+
+export function rebrandProductName(source) {
+  return source.replaceAll(PRODUCT_NAME_BEFORE, PRODUCT_NAME_AFTER);
+}
+
 export function patchOriginalSettingsRegistry(source) {
   return replaceExactlyOnce(source, REGISTRY_BEFORE, REGISTRY_AFTER, "settings registry");
 }
@@ -53,40 +65,75 @@ export function patchOriginalSettingsPanel(source) {
   return patched;
 }
 
+async function rebrandStagedPackageProductName(stageRoot) {
+  // Electron reads `productName` from the app package.json for app.getName(),
+  // which drives the macOS application-menu name and the default window title.
+  // CFBundleName stays "Grok Bot" (Electron derives the nested helper app names
+  // from it), so this is the correct lever for the visible app name.
+  const packagePath = path.join(stageRoot, "package.json");
+  const parsed = JSON.parse(await readFile(packagePath, "utf8"));
+  if (parsed.productName === PRODUCT_NAME_AFTER) return;
+  parsed.productName = PRODUCT_NAME_AFTER;
+  await writeFile(packagePath, `${JSON.stringify(parsed, null, 2)}\n`);
+}
+
 export async function applyOriginalRendererRouterPatch({ stageRoot }) {
-  const assetsRoot = path.join(stageRoot, "dist", "renderer", "assets");
+  const rendererRoot = path.join(stageRoot, "dist", "renderer");
+  const assetsRoot = path.join(rendererRoot, "assets");
+  const chunkNames = (await readdir(assetsRoot)).filter(name => name.endsWith(".js")).sort();
+  const sources = new Map();
   const registryCandidates = [];
   const panelCandidates = [];
-  for (const name of await readdir(assetsRoot)) {
-    if (!name.endsWith(".js")) continue;
-    const target = path.join(assetsRoot, name);
-    const source = await readFile(target, "utf8");
-    if (source.includes(REGISTRY_BEFORE)) registryCandidates.push({ name, target, source });
-    if (source.includes(COMPONENT_ANCHOR) && source.includes(GENERAL_BEFORE) && source.includes(USAGE_BEFORE)) panelCandidates.push({ name, target, source });
+  for (const name of chunkNames) {
+    const source = await readFile(path.join(assetsRoot, name), "utf8");
+    sources.set(name, source);
+    if (source.includes(REGISTRY_BEFORE)) registryCandidates.push(name);
+    if (source.includes(COMPONENT_ANCHOR) && source.includes(GENERAL_BEFORE) && source.includes(USAGE_BEFORE)) panelCandidates.push(name);
   }
   if (registryCandidates.length !== 1 || panelCandidates.length !== 1) {
     throw new Error(`Expected one original Settings registry and panel chunk, found ${registryCandidates.length}/${panelCandidates.length}.`);
   }
+  const registryChunk = registryCandidates[0];
+  const panelChunk = panelCandidates[0];
+  // Apply the functional Router patches to their chunks, then rebrand every
+  // chunk's product name. A chunk keeps its functional role when it has one;
+  // chunks changed only by the rebrand are recorded with the "rebrand" role.
   const changes = [];
-  for (const [role, candidate, transform] of [
-    ["registry", registryCandidates[0], patchOriginalSettingsRegistry],
-    ["panel", panelCandidates[0], patchOriginalSettingsPanel],
-  ]) {
-    const patched = transform(candidate.source);
-    await writeFile(candidate.target, patched);
+  for (const name of chunkNames) {
+    const source = sources.get(name);
+    let patched = source;
+    if (name === registryChunk) patched = patchOriginalSettingsRegistry(patched);
+    if (name === panelChunk) patched = patchOriginalSettingsPanel(patched);
+    patched = rebrandProductName(patched);
+    if (patched === source) continue;
+    await writeFile(path.join(assetsRoot, name), patched);
     changes.push({
-      role,
-      path: `dist/renderer/assets/${candidate.name}`,
-      original: { bytes: Buffer.byteLength(candidate.source), sha256: sha256(candidate.source) },
+      role: name === registryChunk ? "registry" : name === panelChunk ? "panel" : "rebrand",
+      path: `dist/renderer/assets/${name}`,
+      original: { bytes: Buffer.byteLength(source), sha256: sha256(source) },
       patched: { bytes: Buffer.byteLength(patched), sha256: sha256(patched) },
     });
   }
+  // Rebrand the renderer HTML shell (its <title> drives the window title bar).
+  const indexHtmlPath = path.join(rendererRoot, "index.html");
+  const indexHtmlSource = await readFile(indexHtmlPath, "utf8");
+  const indexHtmlPatched = rebrandProductName(indexHtmlSource);
+  if (indexHtmlPatched !== indexHtmlSource) {
+    await writeFile(indexHtmlPath, indexHtmlPatched);
+    changes.push({
+      role: "rebrand",
+      path: "dist/renderer/index.html",
+      original: { bytes: Buffer.byteLength(indexHtmlSource), sha256: sha256(indexHtmlSource) },
+      patched: { bytes: Buffer.byteLength(indexHtmlPatched), sha256: sha256(indexHtmlPatched) },
+    });
+  }
+  await rebrandStagedPackageProductName(stageRoot);
   const record = {
     schemaVersion: 1,
     mode: "original-renderer-settings-extension",
     chunks: changes,
-    features: ["settings-router-provider", "settings-local-docker-vm", "usage-current-provider"],
-    transformations: ["settings-registry", "router-panel", "usage-panel"],
+    features: ["settings-router-provider", "settings-local-docker-vm", "usage-current-provider", "product-rebrand"],
+    transformations: ["settings-registry", "router-panel", "usage-panel", "product-rebrand"],
   };
   const provenancePath = path.join(stageRoot, "dist", "renderer-router-extension.json");
   await writeFile(provenancePath, `${JSON.stringify(record, null, 2)}\n`);

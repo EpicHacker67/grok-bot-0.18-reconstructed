@@ -186,5 +186,5 @@ export const UI_TEXT = {
   signOut: "Sign out",
   signOutDescription: "You’ll need to sign in again to use your Cursor account with Grok Bot.",
   signOutTitle: "Sign out?",
-  title: "Grok Bot"
+  title: "Mengel"
 } as const;

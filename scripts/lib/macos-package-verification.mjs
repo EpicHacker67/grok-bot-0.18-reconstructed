@@ -102,7 +102,7 @@ export async function verifyChecksumPinnedRendererPackage({
     const chunks = new Map();
     for (const row of parsed.chunks) {
       const relative = typeof row?.path === "string" && row.path.startsWith("dist/renderer/") ? row.path.slice("dist/renderer/".length) : null;
-      if (relative == null || !expectedFiles.has(relative) || chunks.has(relative) || !["registry", "panel"].includes(row.role)
+      if (relative == null || !expectedFiles.has(relative) || chunks.has(relative) || !["registry", "panel", "rebrand"].includes(row.role)
         || !Number.isInteger(row.original?.bytes) || !/^[0-9a-f]{64}$/.test(row.original?.sha256)
         || !Number.isInteger(row.patched?.bytes) || !/^[0-9a-f]{64}$/.test(row.patched?.sha256)) {
         throw new Error("Renderer extension chunk provenance is invalid");
@@ -111,7 +111,7 @@ export async function verifyChecksumPinnedRendererPackage({
       if (row.original.bytes !== expected.bytes || row.original.sha256 !== expected.sha256) throw new Error(`Renderer extension source identity drift at ${relative}`);
       chunks.set(relative, row);
     }
-    if (chunks.size < 1 || chunks.size > 2) throw new Error("Renderer extension chunk cardinality is invalid");
+    if (chunks.size < 1 || chunks.size > expectedFiles.size) throw new Error("Renderer extension chunk cardinality is invalid");
     rendererExtension = { bytes, parsed, chunks };
   } catch (error) {
     if (!(error instanceof Error) || !/not found in archive|Cannot find/.test(error.message)) throw error;

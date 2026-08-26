@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { runRoutedProviderText } from "../host/extensions/inference/provider-session.js";
 import type { SandInferenceProvider } from "../shared/inference-router.js";
 import { SandSettingsStore } from "../shared/node/settings/sand-settings-store.js";
+import { createBoxComputerTools } from "./box-computer-tools.js";
 import { createRoutedMcpBridge } from "./routed-mcp-bridge.js";
 
 type StoredEntry = {
@@ -159,9 +160,14 @@ export function createCoordinatorInferenceRouter(options: {
       emitTranscript(agentId, assistantStreamStarted ? "updated" : "appended", entry);
       assistantStreamStarted = true;
     };
+    // When the box runs in a local Docker container, expose its computer tools
+    // (shell, screenshot, browser, click/type) to the routed agent so it can
+    // drive the box the way the native agent drives the cloud computer.
+    const boxTools = settings.getBoxRuntime() === "local-docker" ? createBoxComputerTools() : null;
     const bridge = provider === "claude-code" ? await createRoutedMcpBridge({
       listTools: () => options.dispatchRemote("listRoutedMcpTools", {}),
       callTool: tool => options.dispatchRemote("executeRoutedMcpTool", { ...tool, agentId }),
+      ...(boxTools == null ? {} : { boxTools }),
     }) : null;
     const directTools = bridge == null ? await options.dispatchRemote("listRoutedMcpTools", {}) : undefined;
     const tools = Array.isArray(directTools) ? directTools as Record<string, any>[] : undefined;
