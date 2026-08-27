@@ -94,7 +94,7 @@ test("Router settings use the trusted backend and display recorded inference usa
   assert.match(providers, /mcpServers: \{ grok_bot_plugins:/);
   assert.match(providers, /recordRoutedUsage\(provider, usage\)/);
   assert.match(providers, /queryClaude/);
-  assert.match(providers, /tools: mcpServerUrl == null \? \[\] : \["mcp__grok_bot_plugins__\*"\]/);
+  assert.match(providers, /allowedTools: mcpServerUrl == null \? \[\] : \["mcp__grok_bot_plugins"\]/);
   assert.match(providers, /https:\/\/openrouter\.ai\/api\/v1/);
   assert.match(providers, /OpenRouter needs OPENROUTER_API_KEY/);
   assert.match(cursorSession, /routedProvider !== "cursor"/);

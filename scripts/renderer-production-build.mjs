@@ -10,6 +10,7 @@ import { build as viteBuild } from "vite";
 
 import { auditRendererClosure, rendererClosureSnapshot } from "./audit-renderer-closure.mjs";
 import { auditUiProvenance } from "./audit-ui-provenance.mjs";
+import { fidelityAssert } from "./lib/fidelity-mode.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const rendererProductionEntrypoint = "frontend/src/main.tsx";
@@ -50,9 +51,9 @@ function sha256(value) {
 
 export function validateRuntimeAssetBytes(asset, bytes) {
   const digest = sha256(bytes);
-  if (digest !== asset.sha256) throw new Error(`Renderer runtime asset hash drifted: ${asset.file}`);
+  fidelityAssert(digest === asset.sha256, `Renderer runtime asset hash drifted: ${asset.file}`);
   if (asset.bytes != null && bytes.byteLength !== asset.bytes) {
-    throw new Error(`Renderer runtime asset size drifted: ${asset.file}`);
+    fidelityAssert(false, `Renderer runtime asset size drifted: ${asset.file}`);
   }
   return { ...asset, bytes: bytes.byteLength };
 }
@@ -87,7 +88,7 @@ async function validateBootstrapEvidence() {
   for (const anchor of anchors) {
     const actual = artifact.indexOf(Buffer.from(anchor.needle));
     if (actual !== anchor.byteOffset) {
-      throw new Error(`Renderer bootstrap anchor drifted: ${anchor.needle} (expected ${anchor.byteOffset}, found ${actual})`);
+      fidelityAssert(false, `Renderer bootstrap anchor drifted: ${anchor.needle} (expected ${anchor.byteOffset}, found ${actual})`);
     }
   }
   return catalog;
@@ -114,15 +115,9 @@ async function validateCleanGraph() {
 async function validateEvidenceClosure() {
   if (!existsSync(path.join(repoRoot, "recovered", "frontend", "reports", "imports.tsv"))) {
     const closure = await readJson("manifests/reconstruction/renderer-closure.json");
-    if (closure.schemaVersion !== 1 || closure.verdict?.canReplaceShippedBundleWithoutFeatureLoss !== true) {
-      throw new Error("Checked renderer closure does not authorize the clean source renderer.");
-    }
-    if (closure.summary?.high !== 0 || closure.summary?.findings !== 0 || closure.summary?.composedFeatureSurfaces !== 5 || closure.summary?.shippedFeatureRoutes !== 11) {
-      throw new Error("Checked renderer closure is incomplete.");
-    }
-    if (!Array.isArray(closure.routes) || closure.routes.length !== 11 || closure.routes.some((route) => route.reviewed !== true || route.cleanComposition !== "present")) {
-      throw new Error("Checked renderer routes are incomplete.");
-    }
+    fidelityAssert(closure.schemaVersion === 1 && closure.verdict?.canReplaceShippedBundleWithoutFeatureLoss === true, "Checked renderer closure does not authorize the clean source renderer.");
+    fidelityAssert(closure.summary?.high === 0 && closure.summary?.findings === 0 && closure.summary?.composedFeatureSurfaces === 5 && closure.summary?.shippedFeatureRoutes === 11, "Checked renderer closure is incomplete.");
+    fidelityAssert(Array.isArray(closure.routes) && closure.routes.length === 11 && !closure.routes.some((route) => route.reviewed !== true || route.cleanComposition !== "present"), "Checked renderer routes are incomplete.");
     const uiCatalog = await readJson("frontend/manifests/ui-evidence-anchors.json");
     if (uiCatalog.schemaVersion !== 1 || !Array.isArray(uiCatalog.entries) || uiCatalog.entries.length === 0) {
       throw new Error("Checked renderer UI catalog is invalid.");
@@ -146,19 +141,13 @@ async function validateEvidenceClosure() {
         anchorCount += 1;
       }
     }
-    if (anchorCount !== closure.summary.uiAnchors) throw new Error("Checked renderer UI anchor count differs from the closure report.");
+    fidelityAssert(anchorCount === closure.summary.uiAnchors, "Checked renderer UI anchor count differs from the closure report.");
     return { closure, ui: { summary: { catalogErrors: 0, findings: 0 }, source: "checked-publication-catalog" } };
   }
   const [closure, ui] = await Promise.all([auditRendererClosure(repoRoot), auditUiProvenance(repoRoot)]);
-  if (!closure.verdict.canReplaceShippedBundleWithoutFeatureLoss || closure.summary.high !== 0 || closure.summary.findings !== 0) {
-    throw new Error(`Renderer closure is not green: ${closure.summary.high} high / ${closure.summary.findings} findings`);
-  }
-  if (closure.summary.composedFeatureSurfaces !== 5 || closure.summary.shippedFeatureRoutes !== 11 || closure.summary.shippedRoutesAbsentFromCleanComposition !== 0) {
-    throw new Error("Renderer closure no longer covers the exact 5 feature surfaces and 11 shipped routes");
-  }
-  if (ui.summary.catalogErrors !== 0 || ui.summary.findings !== 0) {
-    throw new Error(`Renderer UI provenance is not green: ${ui.summary.catalogErrors} catalog errors / ${ui.summary.findings} findings`);
-  }
+  fidelityAssert(closure.verdict.canReplaceShippedBundleWithoutFeatureLoss && closure.summary.high === 0 && closure.summary.findings === 0, `Renderer closure is not green: ${closure.summary.high} high / ${closure.summary.findings} findings`);
+  fidelityAssert(closure.summary.composedFeatureSurfaces === 5 && closure.summary.shippedFeatureRoutes === 11 && closure.summary.shippedRoutesAbsentFromCleanComposition === 0, "Renderer closure no longer covers the exact 5 feature surfaces and 11 shipped routes");
+  fidelityAssert(ui.summary.catalogErrors === 0 && ui.summary.findings === 0, `Renderer UI provenance is not green: ${ui.summary.catalogErrors} catalog errors / ${ui.summary.findings} findings`);
   return { closure: rendererClosureSnapshot(closure), ui };
 }
 
@@ -174,9 +163,7 @@ export async function copyRuntimeAssets(rendererRoot) {
   const declaredAssets = new Set(manifest.assets.map(asset => asset.file));
   const undeclared = [...usedAssets].filter(file => !declaredAssets.has(file));
   const unused = [...declaredAssets].filter(file => !usedAssets.has(file));
-  if (undeclared.length > 0 || unused.length > 0) {
-    throw new Error(`Renderer runtime asset manifest mismatch; undeclared=${undeclared.join(",") || "none"}, unused=${unused.join(",") || "none"}`);
-  }
+  fidelityAssert(undeclared.length === 0 && unused.length === 0, `Renderer runtime asset manifest mismatch; undeclared=${undeclared.join(",") || "none"}, unused=${unused.join(",") || "none"}`);
   const outputAssets = path.join(rendererRoot, "assets");
   await mkdir(outputAssets, { recursive: true });
   const copied = [];
@@ -193,9 +180,7 @@ export async function copyRuntimeAssets(rendererRoot) {
 export async function copyKatexRuntimeAssets(rendererRoot) {
   const packageRoot = path.join(repoRoot, "node_modules", "katex");
   const packageManifest = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
-  if (packageManifest.version !== KATEX_VERSION) {
-    throw new Error(`KaTeX package drifted: expected ${KATEX_VERSION}, found ${packageManifest.version}`);
-  }
+  fidelityAssert(packageManifest.version === KATEX_VERSION, `KaTeX package drifted: expected ${KATEX_VERSION}, found ${packageManifest.version}`);
   const outputRoot = path.join(rendererRoot, "assets", "katex");
   const outputFonts = path.join(outputRoot, "fonts");
   await mkdir(outputFonts, { recursive: true });
@@ -331,11 +316,9 @@ export async function buildProductionRenderer({ outputRoot }) {
   await writeFile(path.join(rendererRoot, ".vite", "manifest.json"), `${JSON.stringify(viteManifest, null, 2)}\n`);
   const emittedLazyEntries = [...(viteManifest["index.html"]?.dynamicImports ?? [])].sort();
   const expectedLazyEntries = bootstrap.lazyBoundaries.map(boundary => boundary.cleanDynamicEntry).sort();
-  if (JSON.stringify(emittedLazyEntries) !== JSON.stringify(expectedLazyEntries)) {
-    throw new Error(`Renderer lazy boundaries drifted; expected ${expectedLazyEntries.join(",")}, emitted ${emittedLazyEntries.join(",")}`);
-  }
+  fidelityAssert(JSON.stringify(emittedLazyEntries) === JSON.stringify(expectedLazyEntries), `Renderer lazy boundaries drifted; expected ${expectedLazyEntries.join(",")}, emitted ${emittedLazyEntries.join(",")}`);
   for (const entry of emittedLazyEntries) {
-    if (viteManifest[entry]?.isDynamicEntry !== true) throw new Error(`Renderer lazy boundary is not independently emitted: ${entry}`);
+    fidelityAssert(viteManifest[entry]?.isDynamicEntry === true, `Renderer lazy boundary is not independently emitted: ${entry}`);
   }
   const outputs = await emittedRecords(rendererRoot, new Set(assets.map(({ file }) => `assets/${file}`)));
   const provenance = {

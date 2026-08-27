@@ -17,6 +17,11 @@ export const reconstructedUpdaterGuard = [
   "process.env.SAND_DISABLE_UPDATES ??= \"1\";",
   "process.env.SAND_DISABLE_SENTRY ??= \"1\";",
   "process.env.SAND_DISABLE_TELEMETRY ??= \"1\";",
+  "// Reconstructed-build guard: keep an own isolated data directory instead of",
+  "// sharing the upstream Grok Bot installation's user data and sand root.",
+  "if (process.platform === \"darwin\" && (process.env.SAND_USER_DATA_DIR ?? \"\").trim().length === 0) {",
+  "  process.env.SAND_USER_DATA_DIR = require(\"node:path\").join(require(\"node:os\").homedir(), \"Library\", \"Application Support\", \"Mengel\");",
+  "}",
   ""
 ].join("\n");
 
