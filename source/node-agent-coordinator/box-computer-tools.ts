@@ -99,17 +99,20 @@ async function computerShell(args: Record<string, unknown>): Promise<McpToolResu
 const CHROME_PROFILE = "/home/box/agent-chrome";
 const CHROME_FLAGS = "--no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --password-store=basic --start-maximized";
 
-// Poll until a visible Chrome window exists, so the tool only reports success
-// once the browser is actually on screen (the first launch in a fresh box takes
-// a little while, even under Rosetta).
-async function waitForChromeWindow(timeoutMs: number): Promise<boolean> {
+// Poll until a Chrome window has actually loaded a page — Chrome opens a blank
+// "New Tab" window first and only then navigates, which under Rosetta takes a
+// few seconds, so waiting for a bare window would report success while the
+// screen is still blank. Returns the loaded window id (or null on timeout).
+async function waitForLoadedChromeWindow(timeoutMs: number): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   do {
-    const found = await displayExec(["bash", "-lc", "xdotool search --onlyvisible --class chrome 2>/dev/null | head -1"], 5_000);
-    if (found.stdout.toString().trim().length > 0) return true;
+    const found = await displayExec(["bash", "-lc",
+      'for w in $(xdotool search --onlyvisible --class chrome 2>/dev/null); do t=$(xdotool getwindowname "$w" 2>/dev/null); case "$t" in ""|"New Tab"*|"about:blank"*|"Untitled"*) ;; *) echo "$w"; break;; esac; done'], 5_000);
+    const id = found.stdout.toString().trim();
+    if (id.length > 0) return id;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   } while (Date.now() < deadline);
-  return false;
+  return null;
 }
 
 async function computerOpenUrl(args: Record<string, unknown>): Promise<McpToolResult> {
@@ -120,11 +123,12 @@ async function computerOpenUrl(args: Record<string, unknown>): Promise<McpToolRe
   // Pass the URL as $0 so it is never shell-interpolated. A running Chrome with
   // this profile opens the URL as a new tab; otherwise a window is launched.
   await displayExec(["bash", "-lc", `setsid google-chrome ${CHROME_FLAGS} --user-data-dir=${CHROME_PROFILE} "$0" >/dev/null 2>&1 < /dev/null & disown`, url], 20_000);
-  const visible = await waitForChromeWindow(45_000);
-  if (!visible) return textResult(`Launched Chrome for ${url}, but its window hasn't appeared yet. Take a computer_screenshot in a few seconds to check.`, false);
-  // Give the page a moment to paint before the agent screenshots it.
-  await new Promise((resolve) => setTimeout(resolve, 2_000));
-  return textResult(`Opened ${url} in Chrome on the box and its window is visible. Use computer_screenshot to see the page.`);
+  const windowId = await waitForLoadedChromeWindow(60_000);
+  if (windowId == null) return textResult(`Launched Chrome for ${url}, but the page hasn't finished loading yet. Take a computer_screenshot in a few seconds to check.`, false);
+  // Raise and focus the loaded window so it is the visible, foreground page.
+  await displayExec(["bash", "-lc", `xdotool windowactivate "$0" 2>/dev/null; xdotool windowraise "$0" 2>/dev/null`, windowId], 8_000);
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  return textResult(`Opened ${url} in Chrome on the box; the page is loaded and in the foreground. Use computer_screenshot to see it.`);
 }
 
 async function computerScreenshot(): Promise<McpToolResult> {
