@@ -114,6 +114,28 @@ export async function getLocalDockerStatus(settingsPath: string): Promise<LocalD
 
 let ensureInFlight: Promise<GatewayConnection> | undefined;
 
+// Make the streamed box display (:2, what the desktop app shows) feel more
+// responsive. The box image starts x11vnc with `-noxdamage`, which polls the
+// whole framebuffer every cycle — wasteful under emulation. x11vnc's live
+// remote control (-R, over an X property) lets us switch it to damage-based
+// updates and cut the defer/poll latency on the running instance, without
+// restarting it or fighting the desktop supervisor. Re-applied on every connect
+// so it survives box recreation; retried because the desktop comes up shortly
+// after the gateway is ready.
+async function tuneBoxStream(): Promise<void> {
+  // damage-based updates, low defer/poll latency, and progressive:0 so updates
+  // are sent whole and immediately rather than in progressive vertical bands.
+  // (ncache client-side caching is deliberately not set: it is a startup-only
+  // option that resizes the framebuffer and can show through with noVNC, and it
+  // cannot be toggled on a running instance.)
+  const commands = "x11vnc -display :2 -R noxdamage:0 >/dev/null 2>&1; x11vnc -display :2 -R defer:3 >/dev/null 2>&1; x11vnc -display :2 -R wait:5 >/dev/null 2>&1; x11vnc -display :2 -R progressive:0 >/dev/null 2>&1; x11vnc -display :2 -Q noxdamage 2>/dev/null";
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const result = await runDocker(["exec", "-e", "DISPLAY=:2", LOCAL_DOCKER_BOX_CONTAINER, "bash", "-lc", commands]).catch(() => ({ ok: false, output: "" }));
+    if (result.ok && result.output.includes("noxdamage:0")) return;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+}
+
 async function isDirectory(path: string): Promise<boolean> {
   try { return (await stat(path)).isDirectory(); } catch { return false; }
 }
@@ -205,7 +227,7 @@ async function ensureLocalDockerBox(settingsPath: string, inferenceCredential?: 
   }
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await gatewayReady(token)) return { baseUrl: LOCAL_DOCKER_GATEWAY_URL, token };
+    if (await gatewayReady(token)) { void tuneBoxStream(); return { baseUrl: LOCAL_DOCKER_GATEWAY_URL, token }; }
     const state = await inspectContainer();
     if (!state.running) {
       const logs = await runDocker(["logs", "--tail", "80", LOCAL_DOCKER_BOX_CONTAINER]);
