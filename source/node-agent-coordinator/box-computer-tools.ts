@@ -27,9 +27,12 @@ const DOCKER_BINARY = resolveDockerBinary();
 // Docker box the same way the native agent drives its cloud computer. They shell
 // into the running container with `docker exec`, so they are only meaningful
 // while the box runtime is "local-docker". The container exposes an X display on
-// :1 (1280x800) with Chrome and xdotool, and ffmpeg captures that display.
+// :2 (1280x800) with Chrome and xdotool, and ffmpeg captures that display.
+// :2 is the display the desktop app streams as the box "computer" (its host
+// runs on :1 internally), so the agent must act on :2 for what it does to be
+// what the user sees.
 
-const BOX_DISPLAY = ":1";
+const BOX_DISPLAY = ":2";
 const DEFAULT_SHELL_TIMEOUT_MS = 60_000;
 const MAX_SHELL_TIMEOUT_MS = 300_000;
 const SCREENSHOT_TIMEOUT_MS = 20_000;
@@ -132,7 +135,7 @@ async function computerOpenUrl(args: Record<string, unknown>): Promise<McpToolRe
 }
 
 async function computerScreenshot(): Promise<McpToolResult> {
-  const result = await displayExec(["bash", "-lc", 'SZ=$(xdotool getdisplaygeometry 2>/dev/null | tr " " x); exec ffmpeg -y -loglevel quiet -f x11grab -video_size "${SZ:-1280x800}" -i :1 -frames:v 1 -f image2pipe -vcodec png -'], SCREENSHOT_TIMEOUT_MS);
+  const result = await displayExec(["bash", "-lc", 'SZ=$(xdotool getdisplaygeometry 2>/dev/null | tr " " x); exec ffmpeg -y -loglevel quiet -f x11grab -video_size "${SZ:-1280x800}" -i "$DISPLAY" -frames:v 1 -f image2pipe -vcodec png -'], SCREENSHOT_TIMEOUT_MS);
   if (result.stdout.length === 0) return textResult(`Could not capture the box screen. ${result.stderr}`.trim(), true);
   return { content: [{ type: "image", data: result.stdout.toString("base64"), mimeType: "image/png" }] };
 }
@@ -174,7 +177,7 @@ const DEFINITIONS: readonly (McpToolDefinition & { readonly run: (args: Record<s
   },
   {
     name: "computer_screenshot",
-    description: "Capture a PNG screenshot of the box's desktop (display :1, 1280x800). Use it to see the current screen before clicking or typing.",
+    description: "Capture a PNG screenshot of the box's desktop (the display the user sees, 1280x800). Use it to see the current screen before clicking or typing.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     run: () => computerScreenshot(),
   },
