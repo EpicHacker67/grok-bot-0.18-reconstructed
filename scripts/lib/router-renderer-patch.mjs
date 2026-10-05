@@ -54,6 +54,16 @@ export function rebrandProductName(source) {
   return source.replaceAll(PRODUCT_NAME_BEFORE, PRODUCT_NAME_AFTER);
 }
 
+// Reconstructed packages disable the upstream updater, so the floating "update
+// available" footer pill (cloud-download icon) is dead UI. `sTn(n)` is the gate
+// that decides whether the pill shows; forcing it to return null keeps the pill
+// permanently hidden. Applied only to the chunk that defines it.
+const UPDATE_PILL_ANCHOR = "function sTn(n){";
+export function hideUpdatePill(source) {
+  if (!source.includes(UPDATE_PILL_ANCHOR)) return source;
+  return source.replace(UPDATE_PILL_ANCHOR, `${UPDATE_PILL_ANCHOR}return null;`);
+}
+
 export function patchOriginalSettingsRegistry(source) {
   return replaceExactlyOnce(source, REGISTRY_BEFORE, REGISTRY_AFTER, "settings registry");
 }
@@ -104,6 +114,7 @@ export async function applyOriginalRendererRouterPatch({ stageRoot }) {
     let patched = source;
     if (name === registryChunk) patched = patchOriginalSettingsRegistry(patched);
     if (name === panelChunk) patched = patchOriginalSettingsPanel(patched);
+    patched = hideUpdatePill(patched);
     patched = rebrandProductName(patched);
     if (patched === source) continue;
     await writeFile(path.join(assetsRoot, name), patched);
