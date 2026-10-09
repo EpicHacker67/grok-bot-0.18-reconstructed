@@ -6,7 +6,9 @@ import { isSandUpdateTrack } from "../shared/update-track.js";
 import { isValidIanaTimeZone } from "../shared/timezone.js";
 import { sandWebauthnProxyMirroredEnablement } from "../shared/webauthn-proxy-availability.js";
 import { reportDesktopEdgeFailure } from "./desktop-edge-failures.js";
-import { isSandInferenceProvider } from "../shared/inference-router.js";
+import { isSandInferenceEffort, parseSandInferenceEfforts, isSandInferenceModel, parseSandInferenceModels, isSandInferenceProvider } from "../shared/inference-router.js";
+import { loadClaudeModelCatalog } from "../shared/node/claude-model-catalog.js";
+import { inferenceModelCatalog } from "../shared/node/inference-router-models.js";
 import { getLocalInferenceCliStatus } from "../shared/node/inference-router-local.js";
 import { isSandBoxRuntime } from "../shared/box-runtime.js";
 import { getLocalDockerStatus, startLocalDockerBox, stopLocalDockerBox } from "./box/local-docker-host-connector.js";
@@ -112,8 +114,36 @@ export function createMainEdgeHandlers(deps: MainEdgeDeps): HandlerMap {
     getHostSidebarSections: async () => (await deps.readHostSettingsFromBox()).sidebarSections ?? null,
     setHostSidebarSections: (raw) => echo(deps, "sidebarSections", req(raw).sections, "sidebar sections"),
     getAvailableModels: () => deps.fetchAvailableModels(),
-    getInferenceRouter: async () => { const settings = await deps.readHostSettingsFromBox().catch(() => ({} as UnknownRecord)); const provider = invoke(deps.settingsStore, "getInferenceProvider"); return { provider: isSandInferenceProvider(provider) ? provider : "cursor", usage: settings.inferenceRouterUsage ?? invoke(deps.settingsStore, "getInferenceRouterUsage") ?? null, local: getLocalInferenceCliStatus() }; },
-    setInferenceRouter: async (raw) => { const provider = req(raw).provider; invariant(isSandInferenceProvider(provider), "Unknown inference provider."); invoke(deps.settingsStore, "setInferenceProvider", provider); const settings = await deps.syncHostSettingsToBox({ inferenceProvider: provider }).catch(() => null); return { provider, usage: settings?.inferenceRouterUsage ?? invoke(deps.settingsStore, "getInferenceRouterUsage") ?? null, local: getLocalInferenceCliStatus() }; },
+    getInferenceRouter: async () => {
+      const settings = await deps.readHostSettingsFromBox().catch(() => ({} as UnknownRecord));
+      const provider = invoke(deps.settingsStore, "getInferenceProvider");
+      const models = parseSandInferenceModels(invoke(deps.settingsStore, "getInferenceModels"));
+      const efforts = parseSandInferenceEfforts(invoke(deps.settingsStore, "getInferenceEfforts"));
+      return { codexFastMode: invoke(deps.settingsStore, "getCodexFastMode") === true, efforts, provider: isSandInferenceProvider(provider) ? provider : "cursor", models, ...inferenceModelCatalog(models, await loadClaudeModelCatalog()), usage: settings.inferenceRouterUsage ?? invoke(deps.settingsStore, "getInferenceRouterUsage") ?? null, local: await getLocalInferenceCliStatus() };
+    },
+    setInferenceRouter: async (raw) => {
+      const { provider, model, effort, fastMode } = req(raw);
+      invariant(isSandInferenceProvider(provider), "Unknown inference provider.");
+      const prospective = parseSandInferenceModels(invoke(deps.settingsStore, "getInferenceModels"));
+      if (model !== undefined) {
+        invariant(provider !== "cursor" && (model === null || isSandInferenceModel(model)), "Enter a valid model ID.");
+        if (model === null) delete prospective[provider]; else prospective[provider] = model;
+      }
+      const supported = inferenceModelCatalog(prospective).effortOptions[provider];
+      if (effort !== undefined) invariant(provider !== "cursor" && (effort === null || (isSandInferenceEffort(effort) && supported.includes(effort))), "Choose an effort level supported by this model.");
+      if (fastMode !== undefined) invariant(provider === "codex" && typeof fastMode === "boolean", "Fast mode is available for Codex only.");
+      if (model !== undefined) invoke(deps.settingsStore, "setInferenceModel", provider, model);
+      if (effort !== undefined) invoke(deps.settingsStore, "setInferenceEffort", provider, effort);
+      const previousEfforts = parseSandInferenceEfforts(invoke(deps.settingsStore, "getInferenceEfforts"));
+      if (model !== undefined && previousEfforts[provider] != null && !supported.includes(previousEfforts[provider]!)) invoke(deps.settingsStore, "setInferenceEffort", provider, null);
+      if (fastMode !== undefined) invoke(deps.settingsStore, "setCodexFastMode", fastMode);
+      invoke(deps.settingsStore, "setInferenceProvider", provider);
+      const models = parseSandInferenceModels(invoke(deps.settingsStore, "getInferenceModels"));
+      const efforts = parseSandInferenceEfforts(invoke(deps.settingsStore, "getInferenceEfforts"));
+      const codexFastMode = invoke(deps.settingsStore, "getCodexFastMode") === true;
+      const settings = await deps.syncHostSettingsToBox({ inferenceProvider: provider, inferenceModels: models, inferenceEfforts: efforts, codexFastMode }).catch(() => null);
+      return { provider, models, efforts, codexFastMode, ...inferenceModelCatalog(models, await loadClaudeModelCatalog()), usage: settings?.inferenceRouterUsage ?? invoke(deps.settingsStore, "getInferenceRouterUsage") ?? null, local: await getLocalInferenceCliStatus() };
+    },
     getBoxRuntime: async () => { const mode = invoke(deps.settingsStore, "getBoxRuntime"); invariant(isSandBoxRuntime(mode), "Unknown box runtime."); return { mode, status: await getLocalDockerStatus(String(Reflect.get(deps.settingsStore, "settingsPath"))) }; },
     setBoxRuntime: async (raw) => { const mode = req(raw).mode; invariant(isSandBoxRuntime(mode), "Unknown box runtime."); const settingsPath = String(Reflect.get(deps.settingsStore, "settingsPath")); invoke(deps.settingsStore, "setBoxRuntime", mode); try { if (mode === "local-docker") await startLocalDockerBox(settingsPath); else await stopLocalDockerBox(); } catch (error) { invoke(deps.settingsStore, "setBoxRuntime", mode === "local-docker" ? "remote" : "local-docker"); throw error; } invoke(deps.boxRecovery, "restartCoordinator"); return { mode, status: await getLocalDockerStatus(settingsPath) }; },
 

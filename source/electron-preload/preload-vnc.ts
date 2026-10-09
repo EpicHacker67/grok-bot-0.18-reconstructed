@@ -1,3 +1,5 @@
+import { installRemoteAudio, type RemoteAudioEdge } from "./box-vnc-audio.js";
+import { installRemoteVideo, type RemoteVideoEdge } from "./box-vnc-video.js";
 import { createRealPollingPolicy } from "../internal/scheduling.js";
 import { BOX_VNC_METHOD_TABLE } from "../shared/rpc/vnc.js";
 import { buildHostClipboardPasteScript, resolveHostToBoxSync } from "./box-vnc-clipboard-paste.js";
@@ -72,7 +74,9 @@ export interface VncRendererPort {
   sendToHost(channel: string, payload: unknown): void;
 }
 
-export interface BoxVncEdge {
+export interface BoxVncEdge extends RemoteAudioEdge, RemoteVideoEdge {
+  syncRemoteClipboard(): Promise<{ supported: boolean }>;
+  stopRemoteClipboard(): Promise<unknown>;
   readClipboard(): Promise<string>;
   writeClipboard(input: { readonly text: string }): Promise<unknown>;
   reportUserPresence(input: { readonly isPresent: boolean }): Promise<unknown>;
@@ -149,6 +153,8 @@ export function installVncClipboardBridge(options: {
   const renderer = options.renderer;
   const edge = options.edge;
   const document = options.document;
+  let directClipboard: boolean | undefined;
+  let syncPending = false;
   let lastBoxTextSentToHost = "";
   let lastHostTextSentToBox = "";
   let lastGestureAt = 0;
@@ -156,6 +162,17 @@ export function installVncClipboardBridge(options: {
   const textarea = (): VncTextareaPort | null => getVncClipboardTextarea(document, options.isTextarea);
   function mirrorBoxClipboardToHost(): void {
     if (!visibility.isVisible()) return;
+    if (directClipboard !== false) {
+      if (!syncPending) {
+        syncPending = true;
+        void edge.syncRemoteClipboard().then(result => {
+          directClipboard = result.supported;
+          if (!visibility.isVisible()) void edge.stopRemoteClipboard().catch(() => {});
+        }).catch(error => options.warn?.("remote clipboard sync failed", errorMessage(error)))
+          .finally(() => { syncPending = false; });
+      }
+      return;
+    }
     const element = textarea();
     if (element == null) return;
     const text = element.value;
@@ -171,7 +188,7 @@ export function installVncClipboardBridge(options: {
     if (now - lastGestureAt < VNC_CLIPBOARD_GESTURE_THROTTLE_MS) return;
     lastGestureAt = now;
     edge.readClipboard().then((text) => {
-      if (text.length === 0 || options.frame == null) return;
+      if (!visibility.isVisible() || text.length === 0 || text === lastHostTextSentToBox || text === lastBoxTextSentToHost || options.frame == null) return;
       options.frame.executeJavaScript(buildHostClipboardPasteScript(text)).then((didPaste) => {
         const synced = resolveHostToBoxSync(text, didPaste === true);
         if (synced == null) return;
@@ -186,7 +203,8 @@ export function installVncClipboardBridge(options: {
     });
   }
   options.renderer.on(VNC_VIEWER_VISIBLE_CHANNEL, (_event, value) => {
-    if (visibility.update(value)) mirrorHostClipboardToBox();
+    if (visibility.update(value)) { mirrorBoxClipboardToHost(); mirrorHostClipboardToBox(); }
+    else if (!visibility.isVisible()) void edge.stopRemoteClipboard().catch(() => {});
   });
   const polling = options.startPolling({
     name: "vnc-clipboard-mirror",
@@ -198,7 +216,7 @@ export function installVncClipboardBridge(options: {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") mirrorHostClipboardToBox();
   });
-  options.window.addEventListener("pagehide", () => polling.dispose(), { once: true });
+  options.window.addEventListener("pagehide", () => { polling.dispose(); void edge.stopRemoteClipboard().catch(() => {}); }, { once: true });
 }
 
 export function installVncUserPresenceReporter(options: {
@@ -360,6 +378,7 @@ export function buildVncMacKeyMappingScript(): string {
       window.__sandVncMacKeysInstalled = true;
 
       var SHORTCUTS = { KeyA: 0x61, KeyC: 0x63, KeyV: 0x76, KeyX: 0x78, KeyZ: 0x7a };
+      var ZOOM_KEYS = { "=": 0x3d, "+": 0x2b, "-": 0x2d, "0": 0x30 };
       var CONTROL_L = 0xffe3;
       var SHIFT_L = 0xffe1;
       var HELD_MODIFIERS = [
@@ -374,8 +393,9 @@ export function buildVncMacKeyMappingScript(): string {
         .catch(function () {});
 
       document.addEventListener("keydown", function (e) {
-        if (!e.metaKey) return;
-        var keysym = SHORTCUTS[e.code];
+        if (!e.metaKey || e.altKey) return;
+        var zoom = ZOOM_KEYS[e.key];
+        var keysym = zoom === undefined ? SHORTCUTS[e.code] : zoom;
         if (keysym === undefined) return;
         var rfb = ui && ui.rfb;
         if (!rfb || typeof rfb.sendKey !== "function") return;
@@ -455,6 +475,8 @@ export function installVncPreloadEntrypoint(electron: VncPreloadElectronBindings
       return () => electron.ipcRenderer.off(channel, wrapped);
     },
   }) as BoxVncEdge;
+  const audio = installRemoteAudio(edge, electron.ipcRenderer);
+  installRemoteVideo(edge, electron.ipcRenderer, audio);
   const startPolling: StartPolling = ({ name, intervalMs, task }) => createRealPollingPolicy({ name, intervalMs }).start(async () => { await task(); });
   installVncPreload({
     installBrowserPreload: () => installSandBrowserPreload({

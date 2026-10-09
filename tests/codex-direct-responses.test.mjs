@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { transform } from "esbuild";
+import { build } from "esbuild";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function loadModule() {
-  const source = await readFile(path.join(repoRoot, "source/host/extensions/inference/codex-direct-responses.ts"), "utf8");
-  const { code } = await transform(source, { format: "esm", loader: "ts", target: "es2022" });
+  const result = await build({ entryPoints: [path.join(repoRoot, "source/host/extensions/inference/codex-direct-responses.ts")], bundle: true, write: false, format: "esm", platform: "node", target: "es2022" });
+  const code = result.outputFiles[0].text;
   return import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
 }
 
@@ -45,6 +44,7 @@ test("direct Codex Responses transport streams text without an SDK reader", asyn
   assert.equal(requests.length, 1);
   assert.equal(requests[0].store, false);
   assert.equal(requests[0].stream, true);
+  assert.equal(requests[0].service_tier, "default", "Fast mode is opt-in");
 });
 
 test("direct Codex Responses transport executes Grok Bot tools and continues with the exact call id", async () => {
@@ -97,4 +97,54 @@ test("direct Codex Responses transport fails closed on a truncated stream", asyn
       input: [{ role: "user", content: "hi" }]
     })) {}
   }, /incomplete SSE event/);
+});
+
+test("Codex completes a twelve-tool-round task and preserves every result beyond round eight", async () => {
+  const { streamCodexDirectResponses } = await loadModule();
+  let requests = 0;
+  const calls = [], events = [];
+  for await (const event of streamCodexDirectResponses({
+    endpoint: "https://example.invalid/responses", model: "gpt-test", instructions: "Complete the task",
+    fastMode: true, reasoningEffort: "high",
+    input: [{ role: "user", content: "Inspect twelve items" }],
+    tools: [{ name: "inspect", parameters: { type: "object" }, source: {} }],
+    executeTool: async (_tool, args, id) => { calls.push(id); return { item: args.item }; },
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      assert.equal(request.service_tier, "priority", "Fast mode applies to every tool continuation");
+      assert.equal(request.reasoning.effort, "high", "Fast mode must preserve effort");
+      const results = request.input.filter(item => item.type === "function_call_output");
+      assert.deepEqual(results.map(item => [item.call_id, JSON.parse(item.output)]),
+        calls.map((id, index) => [id, { item: index + 1 }]));
+      requests++;
+      const output = requests <= 12
+        ? [{ type: "function_call", name: "inspect", call_id: `call-${requests}`, arguments: JSON.stringify({ item: requests }) }]
+        : [{ type: "message", role: "assistant", content: [] }];
+      return sse([
+        ...(requests === 13 ? [{ type: "response.output_text.delta", delta: "All twelve inspected." }] : []),
+        { type: "response.completed", response: { id: `response-${requests}`, output, usage: { input_tokens: 10, output_tokens: 1 } } },
+      ]);
+    },
+  })) events.push(event);
+  assert.equal(requests, 13);
+  assert.equal(calls.length, 12);
+  assert.equal(events.at(-1).text, "All twelve inspected.");
+  assert.equal(events.at(-1).usage.inputTokens, 130);
+});
+
+test("Codex still enforces an explicit round ceiling", async () => {
+  const { streamCodexDirectResponses } = await loadModule();
+  let requests = 0, executions = 0;
+  await assert.rejects(async () => {
+    for await (const _event of streamCodexDirectResponses({
+      endpoint: "https://example.invalid/responses", model: "gpt-test", instructions: "Test limit", input: [], maxSteps: 2,
+      tools: [{ name: "inspect", parameters: { type: "object" }, source: {} }],
+      executeTool: async () => { executions++; return {}; },
+      fetch: async () => sse([{ type: "response.completed", response: { id: `r-${++requests}`, output: [
+        { type: "function_call", name: "inspect", call_id: `c-${requests}`, arguments: "{}" },
+      ] } }]),
+    })) {}
+  }, /Mengel's 2-round limit/);
+  assert.equal(requests, 2);
+  assert.equal(executions, 2);
 });

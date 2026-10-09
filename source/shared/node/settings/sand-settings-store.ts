@@ -9,7 +9,7 @@ import { DEFAULT_SAND_AUTO_REVIEW_INSTRUCTIONS, normalizeSandAutoReviewInstructi
 import { SidebarSections, type SidebarSection } from "../../sidebar-sections.js";
 import { coerceToEnabledTrack, isSandUpdateTrack, type SandUpdateTrack } from "../../update-track.js";
 import { isSandAgentModelSelection, type SandAgentModelSelection } from "../../agents/sand-agent-model.js";
-import { emptySandInferenceRouterUsage, isSandInferenceProvider, type SandInferenceProvider, type SandInferenceRouterUsage } from "../../inference-router.js";
+import { emptySandInferenceRouterUsage, isSandInferenceProvider, isSandInferenceModel, parseSandInferenceModels, type SandInferenceModels, isSandInferenceEffort, parseSandInferenceEfforts, type SandInferenceEfforts, type SandInferenceEffort, type SandInferenceProvider, type SandInferenceRouterUsage } from "../../inference-router.js";
 import { DEFAULT_SAND_BOX_RUNTIME, isSandBoxRuntime, type SandBoxRuntime } from "../../box-runtime.js";
 
 export const SETTINGS_VERSION = 1;
@@ -26,8 +26,9 @@ export interface SandStoredSettings {
   agentDefaultModel?: SandAgentModelSelection; computerUseModel?: SandAgentModelSelection; notifications?: Record<string, unknown>;
   userTimeZone?: string; userTimeZoneOverride?: string; autoReviewInstructions?: SandAutoReviewInstructions;
   localToolPermission?: SandLocalToolPermission; localToolPermissionCeiling?: SandLocalToolPermission;
-  inferenceProvider?: SandInferenceProvider; inferenceRouterUsage?: SandInferenceRouterUsage;
+  inferenceEfforts?: SandInferenceEfforts; inferenceModels?: SandInferenceModels; inferenceProvider?: SandInferenceProvider; inferenceRouterUsage?: SandInferenceRouterUsage;
   boxRuntime?: SandBoxRuntime;
+  codexFastMode?: boolean;
   mcpCustomInstructionsAccountScope?: string; pinnedAgentIds?: string[]; sidebarSections?: SidebarSection[];
 }
 
@@ -69,6 +70,9 @@ function parseSettings(value: unknown): SandStoredSettings | null {
   if (typeof raw.autoReviewInstructions === "object" && raw.autoReviewInstructions != null) result.autoReviewInstructions = normalizeSandAutoReviewInstructions(raw.autoReviewInstructions as Record<string, unknown>);
   if (isSandLocalToolPermission(raw.localToolPermission)) result.localToolPermission = raw.localToolPermission;
   if (isSandLocalToolPermission(raw.localToolPermissionCeiling)) result.localToolPermissionCeiling = raw.localToolPermissionCeiling;
+  result.inferenceEfforts = parseSandInferenceEfforts(raw.inferenceEfforts);
+  result.codexFastMode = raw.codexFastMode === true;
+  result.inferenceModels = parseSandInferenceModels(raw.inferenceModels);
   if (isSandInferenceProvider(raw.inferenceProvider)) result.inferenceProvider = raw.inferenceProvider;
   if (isSandBoxRuntime(raw.boxRuntime)) result.boxRuntime = raw.boxRuntime;
   if (typeof raw.inferenceRouterUsage === "object" && raw.inferenceRouterUsage != null && !Array.isArray(raw.inferenceRouterUsage)) {
@@ -156,7 +160,34 @@ export class SandSettingsStore {
   getLocalToolPermissionCeiling(): SandLocalToolPermission | undefined { return this.load().localToolPermissionCeiling; }
   setLocalToolPermission(value: SandLocalToolPermission): void { this.update((s) => ({ ...s, localToolPermission: value })); }
   getInferenceProvider(): SandInferenceProvider { return this.load().inferenceProvider ?? "cursor"; }
+  getCodexFastMode(): boolean { return this.load().codexFastMode === true; }
+  setCodexFastMode(value: boolean): void {
+    if (typeof value !== "boolean") throw new Error("Fast mode must be on or off.");
+    this.update(s => ({ ...s, codexFastMode: value }));
+  }
   setInferenceProvider(value: SandInferenceProvider): void { this.update((s) => ({ ...s, inferenceProvider: value })); }
+  getInferenceEfforts(): SandInferenceEfforts { return this.load().inferenceEfforts ?? {}; }
+  getInferenceEffort(provider: SandInferenceProvider): SandInferenceEffort | undefined { return this.getInferenceEfforts()[provider]; }
+  setInferenceEffort(provider: SandInferenceProvider, effort: SandInferenceEffort | null): void {
+    if (provider === "cursor" || (effort !== null && !isSandInferenceEffort(effort))) throw new Error("Choose a valid effort level.");
+    this.update(s => {
+      const efforts = { ...s.inferenceEfforts };
+      if (effort === null) delete efforts[provider]; else efforts[provider] = effort;
+      return { ...s, inferenceEfforts: efforts };
+    });
+  }
+  setInferenceEfforts(efforts: unknown): void { this.update(s => ({ ...s, inferenceEfforts: parseSandInferenceEfforts(efforts) })); }
+  getInferenceModels(): SandInferenceModels { return this.load().inferenceModels ?? {}; }
+  getInferenceModel(provider: SandInferenceProvider): string | undefined { return this.getInferenceModels()[provider]; }
+  setInferenceModel(provider: SandInferenceProvider, model: string | null): void {
+    if (provider === "cursor" || (model !== null && !isSandInferenceModel(model))) throw new Error("Enter a valid model ID.");
+    this.update(s => {
+      const models = { ...s.inferenceModels };
+      if (model === null) delete models[provider]; else models[provider] = model;
+      return { ...s, inferenceModels: models };
+    });
+  }
+  setInferenceModels(models: unknown): void { this.update(s => ({ ...s, inferenceModels: parseSandInferenceModels(models) })); }
   getInferenceRouterUsage(): SandInferenceRouterUsage { return this.load().inferenceRouterUsage ?? emptySandInferenceRouterUsage(); }
   recordInferenceUsage(provider: SandInferenceProvider, usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }): void {
     const safe = (value: number | undefined): number => Number.isFinite(value) && value! >= 0 ? Math.round(value!) : 0;

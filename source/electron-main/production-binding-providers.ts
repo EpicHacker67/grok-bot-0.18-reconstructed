@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { configureRemoteDocker } from "../shared/node/remote-docker.js";
 
 import { createGetOrCreateMachineId } from "./account/cursor-machine-id.js";
 import {
@@ -246,6 +247,7 @@ export function createProductionSettingsBinding(
     create(args) {
       if (created) throw new Error("Electron production settings service was created more than once.");
       created = true;
+      configureRemoteDocker(resolveRoot());
       const settingsStore = new SandSettingsStore(join(resolveRoot(), "settings.json"));
       let themeController: SandThemeController | undefined;
       let disposed = false;
