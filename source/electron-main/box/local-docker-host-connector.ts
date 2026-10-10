@@ -1,3 +1,5 @@
+import { ensureRemoteAudio } from "./remote-audio.js";
+import { browserProfileMounts, preserveBrowserProfiles } from "./browser-profile-storage.js";
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
@@ -6,16 +8,17 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { LOCAL_DOCKER_BOX_CONTAINER } from "../../shared/box-runtime.js";
+import { resolveDockerBinary, stageRemoteDockerDirectory } from "../../shared/node/remote-docker.js";
 import type { SandSettingsStore } from "../../shared/node/settings/sand-settings-store.js";
 import type { RecreateResult } from "./box-recreate-commands.js";
 import type { SandRemoteHostConnector } from "./box-host-connector.js";
 import type { GatewayConnection } from "./gateway-descriptor-cache.js";
 
-export const LOCAL_DOCKER_BOX_IMAGE = "public.ecr.aws/k0i0n2g5/cursorenvironments/universal:sand-box-latest";
+export const LOCAL_DOCKER_BOX_IMAGE = "public.ecr.aws/k0i0n2g5/cursorenvironments/universal@sha256:289490f863d51a698c900839943311ba30e850efea0d6911edf62e7c07b50fe3";
 export { LOCAL_DOCKER_BOX_CONTAINER };
 export const LOCAL_DOCKER_GATEWAY_URL = "http://127.0.0.1:1340";
 export const LOCAL_DOCKER_OWNER_LABEL = "com.grok-bot.local-vm=1";
-export const LOCAL_DOCKER_SCHEMA_VERSION = "6";
+export const LOCAL_DOCKER_SCHEMA_VERSION = "9";
 const READY_TIMEOUT_MS = 180_000;
 const OPTIONAL_CREDENTIAL_TIMEOUT_MS = 3_000;
 
@@ -34,7 +37,7 @@ interface LocalHostBundle { readonly path: string; readonly sha256: string; read
 
 function runDocker(args: readonly string[]): Promise<CommandResult> {
   return new Promise((resolve) => {
-    const child = spawn("docker", [...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(resolveDockerBinary(), [...args], { stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     const append = (chunk: Buffer): void => { output += chunk.toString(); if (output.length > 200_000) output = output.slice(-200_000); };
     child.stdout?.on("data", append);
@@ -59,7 +62,8 @@ async function persistInferenceCredential(settingsPath: string, credential: Infe
   await writeFile(temporary, `${JSON.stringify({ accessToken: credential.accessToken, expiresAtMs: credential.expiresAtMs })}\n`, { encoding: "utf8", mode: 0o600 });
   await rename(temporary, target);
   await chmod(target, 0o600);
-  return target;
+  const remote = await stageRemoteDockerDirectory(dirname(target), "credential");
+  return join(remote, "inference.json");
 }
 
 async function readOrCreateToken(settingsPath: string): Promise<string> {
@@ -83,6 +87,17 @@ async function gatewayReady(token: string): Promise<boolean> {
     });
     return response.ok;
   } catch { return false; }
+}
+
+async function verifyRunningHost(token: string, expectedSha256: string): Promise<void> {
+  const response = await fetch(`${LOCAL_DOCKER_GATEWAY_URL}/health`, {
+    headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(2_000),
+  });
+  const health = await response.json() as { pid?: unknown };
+  if (!Number.isInteger(health.pid) || Number(health.pid) < 1) throw new Error("Computer gateway did not report its host process.");
+  const script = `const fs=require('fs'),crypto=require('crypto');const argv=fs.readFileSync('/proc/'+process.argv[1]+'/cmdline','utf8').split('\\0');const entry=argv.find(p=>p.endsWith('/host-main.cjs'));if(!entry)process.exit(2);console.log(crypto.createHash('sha256').update(fs.readFileSync(entry)).digest('hex'));`;
+  const result = await runDocker(["exec", LOCAL_DOCKER_BOX_CONTAINER, "/exec-daemon/node", "-e", script, String(health.pid)]);
+  if (!result.ok || result.output !== expectedSha256) throw new Error("Computer is not running Mengel's reconstructed host; refusing to connect to a stock host.");
 }
 
 async function inspectContainer(): Promise<{ exists: boolean; running: boolean; owned: boolean; image: string; hostSha256: string; hasInferenceCredential: boolean; schemaVersion: string }> {
@@ -123,14 +138,16 @@ let ensureInFlight: Promise<GatewayConnection> | undefined;
 // so it survives box recreation; retried because the desktop comes up shortly
 // after the gateway is ready.
 async function tuneBoxStream(): Promise<void> {
+  const display = process.env.SAND_DOCKER_DISPLAY ?? ":2";
+  if (!/^:[0-9]+$/.test(display)) return;
   // damage-based updates, low defer/poll latency, and progressive:0 so updates
   // are sent whole and immediately rather than in progressive vertical bands.
   // (ncache client-side caching is deliberately not set: it is a startup-only
   // option that resizes the framebuffer and can show through with noVNC, and it
   // cannot be toggled on a running instance.)
-  const commands = "x11vnc -display :2 -R noxdamage:0 >/dev/null 2>&1; x11vnc -display :2 -R defer:3 >/dev/null 2>&1; x11vnc -display :2 -R wait:5 >/dev/null 2>&1; x11vnc -display :2 -R progressive:0 >/dev/null 2>&1; x11vnc -display :2 -Q noxdamage 2>/dev/null";
+  const commands = `x11vnc -display ${display} -sync -R xdamage >/dev/null 2>&1; x11vnc -display ${display} -sync -R defer:3 >/dev/null 2>&1; x11vnc -display ${display} -sync -R wait:5 >/dev/null 2>&1; x11vnc -display ${display} -sync -R progressive:0 >/dev/null 2>&1; x11vnc -display ${display} -Q noxdamage 2>/dev/null`;
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const result = await runDocker(["exec", "-e", "DISPLAY=:2", LOCAL_DOCKER_BOX_CONTAINER, "bash", "-lc", commands]).catch(() => ({ ok: false, output: "" }));
+    const result = await runDocker(["exec", "-e", `DISPLAY=${display}`, LOCAL_DOCKER_BOX_CONTAINER, "bash", "-lc", commands]).catch(() => ({ ok: false, output: "" }));
     if (result.ok && result.output.includes("noxdamage:0")) return;
     await new Promise((resolve) => setTimeout(resolve, 2_000));
   }
@@ -151,6 +168,8 @@ async function stageCurrentHostBundle(settingsPath: string): Promise<LocalHostBu
   };
   const hostBytes = await readRuntime("host/host-main.cjs");
   const boxExecDaemonBytes = await readRuntime("box-exec-daemon/main.cjs");
+  const agentWorkerBytes = await readRuntime("host/agent-isolation/agent-store-worker.cjs");
+  const transcriptWorkerBytes = await readRuntime("host/agent-isolation/transcript-mirror-worker.cjs");
   const sha256 = createHash("sha256").update(hostBytes).digest("hex");
   const boxExecDaemonSha256 = createHash("sha256").update(boxExecDaemonBytes).digest("hex");
   const directory = join(dirname(settingsPath), "local-docker-runtime", `${sha256}-${boxExecDaemonSha256}`);
@@ -169,15 +188,22 @@ async function stageCurrentHostBundle(settingsPath: string): Promise<LocalHostBu
     return target;
   };
   await mkdir(directory, { recursive: true });
+  await persistRuntime("host-main.cjs", hostBytes);
+  await persistRuntime("box-exec-daemon/main.cjs", boxExecDaemonBytes);
+  await persistRuntime("agent-isolation/agent-store-worker.cjs", agentWorkerBytes);
+  await persistRuntime("agent-isolation/transcript-mirror-worker.cjs", transcriptWorkerBytes);
+  const staged = await stageRemoteDockerDirectory(directory, `runtime/${sha256}-${boxExecDaemonSha256}`);
   return {
-    path: await persistRuntime("host-main.cjs", hostBytes),
+    path: join(staged, "host-main.cjs"),
     sha256,
-    boxExecDaemonPath: await persistRuntime("box-exec-daemon/main.cjs", boxExecDaemonBytes),
+    boxExecDaemonPath: join(staged, "box-exec-daemon/main.cjs"),
     boxExecDaemonSha256,
   };
 }
 
 async function localAuthMountArguments(): Promise<string[]> {
+  // Local provider sessions stay on the Mac; routed inference runs there.
+  if (process.env.SAND_REMOTE_DOCKER_SSH) return [];
   const mounts: string[] = [];
   for (const [source, destination] of [[join(homedir(), ".codex"), "/root/.codex"], [join(homedir(), ".claude"), "/root/.claude"]] as const) {
     if (await isDirectory(source)) mounts.push("--mount", `type=bind,src=${source},dst=${destination},readonly`);
@@ -186,6 +212,7 @@ async function localAuthMountArguments(): Promise<string[]> {
 }
 
 async function ensureLocalDockerBox(settingsPath: string, inferenceCredential?: InferenceCredential): Promise<GatewayConnection> {
+  const image = process.env.SAND_DOCKER_GPU_IMAGE ?? LOCAL_DOCKER_BOX_IMAGE;
   const token = await readOrCreateToken(settingsPath);
   const hostBundle = await stageCurrentHostBundle(settingsPath);
   const inferenceFile = inferenceCredential == null ? undefined : await persistInferenceCredential(settingsPath, inferenceCredential);
@@ -193,12 +220,13 @@ async function ensureLocalDockerBox(settingsPath: string, inferenceCredential?: 
   if (!daemon.ok) throw new Error(`Local Docker VM is selected, but Docker is unavailable: ${daemon.output || "start Docker and try again"}`);
   const inspected = await inspectContainer();
   if (inspected.exists && !inspected.owned) throw new Error(`Local Docker VM cannot use ${LOCAL_DOCKER_BOX_CONTAINER}: an unowned container already has that name.`);
-  if (inspected.exists && inspected.image !== LOCAL_DOCKER_BOX_IMAGE) throw new Error(`Local Docker VM container uses unexpected image ${inspected.image}. Remove it explicitly before changing images.`);
-  if (inspected.exists && (inspected.schemaVersion !== LOCAL_DOCKER_SCHEMA_VERSION || inspected.hostSha256 !== hostBundle.sha256 || (inferenceCredential != null && !inspected.hasInferenceCredential))) {
+  if (inspected.exists && inspected.image !== LOCAL_DOCKER_BOX_IMAGE && inspected.image !== image) throw new Error(`Local Docker VM container uses unexpected image ${inspected.image}. Remove it explicitly before changing images.`);
+  if (inspected.exists && (inspected.image !== image || inspected.schemaVersion !== LOCAL_DOCKER_SCHEMA_VERSION || inspected.hostSha256 !== hostBundle.sha256 || (inferenceCredential != null && !inspected.hasInferenceCredential))) {
+    await preserveBrowserProfiles(LOCAL_DOCKER_BOX_CONTAINER, LOCAL_DOCKER_BOX_IMAGE, runDocker);
     const removed = await runDocker(["rm", "--force", LOCAL_DOCKER_BOX_CONTAINER]);
     if (!removed.ok) throw new Error(`Could not replace the local VM with the current app runtime: ${removed.output}`);
   }
-  const shouldReplace = inspected.exists && (inspected.schemaVersion !== LOCAL_DOCKER_SCHEMA_VERSION || inspected.hostSha256 !== hostBundle.sha256 || (inferenceCredential != null && !inspected.hasInferenceCredential));
+  const shouldReplace = inspected.exists && (inspected.image !== image || inspected.schemaVersion !== LOCAL_DOCKER_SCHEMA_VERSION || inspected.hostSha256 !== hostBundle.sha256 || (inferenceCredential != null && !inspected.hasInferenceCredential));
   const current = shouldReplace ? await inspectContainer() : inspected;
   if (current.exists && !current.running) {
     const started = await runDocker(["start", LOCAL_DOCKER_BOX_CONTAINER]);
@@ -212,22 +240,32 @@ async function ensureLocalDockerBox(settingsPath: string, inferenceCredential?: 
       "--label", `com.grok-bot.local-vm.inference-credential=${inferenceCredential == null ? "0" : "1"}`,
       "--label", `com.grok-bot.local-vm.schema-version=${LOCAL_DOCKER_SCHEMA_VERSION}`,
       "--platform", "linux/amd64", "--restart", "unless-stopped",
-      "--env", "SAND_SUPERVISOR_ENABLED=1", "--env", "SAND_BOX_AUTO_UPDATE=0", "--env", "SAND_USE_EXISTING_BOX_EXEC_DAEMON=1", "--env", "SAND_TREE_SITTER_NODE_DEPS=/home/box/deps", "--env", "NODE_PATH=/home/box/deps", "--env", "SAND_GATEWAY_BIND_HOST=0.0.0.0", "--env", "SAND_HOST_PORT=1340", "--env", `SAND_GATEWAY_TOKEN=${token}`,
+      ...(process.env.SAND_DOCKER_GPU_IMAGE ? ["--device", "nvidia.com/gpu=0", "--shm-size", "1g", "--env", `MENGEL_MEDIA_ADDRESS=${process.env.SAND_DOCKER_MEDIA_ADDRESS}`, "--publish", `${process.env.SAND_DOCKER_MEDIA_ADDRESS}:8841:8841/udp`] : []),
+      "--env", "SAND_SUPERVISOR_ENABLED=1", "--env", "SAND_BOX_AUTO_UPDATE=0", "--env", "SAND_USE_EXISTING_BOX_EXEC_DAEMON=1", "--env", "SAND_TREE_SITTER_NODE_DEPS=/opt/sand/deps", "--env", "NODE_PATH=/opt/sand/deps", "--env", "SAND_GATEWAY_BIND_HOST=0.0.0.0", "--env", "SAND_HOST_PORT=1340", "--env", `SAND_GATEWAY_TOKEN=${token}`,
+      "--env", "SAND_BOX_STORE_SYNC=0", "--env", "SAND_BOX_STORE_COPY_IN=0", "--env", "SAND_STATE_S3_BACKSTOP=0",
+      ...(process.env.SAND_REMOTE_DOCKER_SSH ? ["--env", "SAND_BACKEND_URL=http://127.0.0.1:9"] : []),
       ...(inferenceCredential == null ? [] : ["--env", "SAND_DEV_INFERENCE_TOKEN_FILE=/run/grok-bot/inference.json", "--env", `SAND_BACKEND_URL=${inferenceCredential.backendUrl}`]),
       "--publish", "127.0.0.1:1337:1337", "--publish", "127.0.0.1:1339:1339", "--publish", "127.0.0.1:1340:1340",
       "--publish", "127.0.0.1:6080:6080", "--publish", "127.0.0.1:6081:6081", "--publish", "127.0.0.1:8790:8790",
-      "--volume", "grok-bot-local-vm-workspace:/workspace", "--volume", "grok-bot-local-vm-data:/home/box/sand-data",
+      "--volume", `${process.env.SAND_REMOTE_DOCKER_SSH ? "mengel-holly" : "grok-bot-local-vm"}-workspace:/workspace`, "--volume", `${process.env.SAND_REMOTE_DOCKER_SSH ? "mengel-holly" : "grok-bot-local-vm"}-data:/home/box/sand-data`,
+      ...browserProfileMounts(),
       "--mount", `type=bind,src=${hostBundle.path},dst=/home/box/sand-host/host-main.cjs,readonly`,
+      "--mount", `type=bind,src=${hostBundle.path},dst=/opt/sand/sand-host/host-main.cjs,readonly`,
+      "--mount", `type=bind,src=${join(dirname(hostBundle.path), "agent-isolation")},dst=/opt/sand/sand-host/agent-isolation,readonly`,
       "--mount", `type=bind,src=${dirname(hostBundle.boxExecDaemonPath)},dst=/home/box/box-exec-daemon,readonly`,
       ...(inferenceFile == null ? [] : ["--mount", `type=bind,src=${dirname(inferenceFile)},dst=/run/grok-bot,readonly`]),
       ...authMounts,
-      LOCAL_DOCKER_BOX_IMAGE,
+      image,
     ]);
     if (!created.ok) throw new Error(`Could not create the local Docker VM: ${created.output}`);
   }
+  // Docker creates missing parents of nested volume mounts as root. Restore
+  // the desktop user's directories before Chrome/PulseAudio need to write them.
+  const homeDirectories = await runDocker(["exec", "--user", "0", LOCAL_DOCKER_BOX_CONTAINER, "install", "-d", "-m", "700", "-o", "box", "-g", "box", "/home/box/.config", "/home/box/.local", "/home/box/.local/share"]);
+  if (!homeDirectories.ok) throw new Error(`Could not prepare the computer's application settings: ${homeDirectories.output}`);
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await gatewayReady(token)) { void tuneBoxStream(); return { baseUrl: LOCAL_DOCKER_GATEWAY_URL, token }; }
+    if (await gatewayReady(token)) { await verifyRunningHost(token, hostBundle.sha256); void tuneBoxStream(); void ensureRemoteAudio().catch(error => console.warn("[mengel:audio]", error.message)); return { baseUrl: LOCAL_DOCKER_GATEWAY_URL, token }; }
     const state = await inspectContainer();
     if (!state.running) {
       const logs = await runDocker(["logs", "--tail", "80", LOCAL_DOCKER_BOX_CONTAINER]);
@@ -256,7 +294,7 @@ export function createSettingsRoutedHostConnector(
 ): SandRemoteHostConnector {
   const localConnect = (): Promise<GatewayConnection> => {
     if (ensureInFlight == null) ensureInFlight = (async () => {
-      const issued = remote.issueInferenceCredential == null ? undefined : await Promise.race([
+      const issued = process.env.SAND_REMOTE_DOCKER_SSH || remote.issueInferenceCredential == null ? undefined : await Promise.race([
         remote.issueInferenceCredential(),
         new Promise<undefined>((resolve) => setTimeout(resolve, OPTIONAL_CREDENTIAL_TIMEOUT_MS)),
       ]);
@@ -282,6 +320,11 @@ export function createSettingsRoutedHostConnector(
       if (settings.getBoxRuntime() !== "local-docker") {
         if (remote.forceRecreate == null) return { status: "rejected", reason: "Remote computer reset is unavailable." };
         return await remote.forceRecreate();
+      }
+      const inspected = await inspectContainer();
+      if (inspected.exists) {
+        if (!inspected.owned) return { status: "rejected", reason: "Refusing to replace an unowned container." };
+        await preserveBrowserProfiles(LOCAL_DOCKER_BOX_CONTAINER, LOCAL_DOCKER_BOX_IMAGE, runDocker);
       }
       const removed = await runDocker(["rm", "--force", LOCAL_DOCKER_BOX_CONTAINER]);
       if (!removed.ok && !/no such container/i.test(removed.output)) return { status: "rejected", reason: removed.output };

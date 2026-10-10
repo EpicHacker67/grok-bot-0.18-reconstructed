@@ -7,12 +7,14 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { jsonSchema, streamText, tool, type CoreMessage, type LanguageModelV1, type ToolSet } from "ai";
 
 import { BasePromptBuilder, BasePromptExecutor } from "../../../packages/chat-inference/base.js";
-import type { SandInferenceProvider } from "../../../shared/inference-router.js";
+import { ROUTED_PROVIDER_MAX_STEPS, isSandInferenceEffort, type SandInferenceEffort, type SandInferenceProvider } from "../../../shared/inference-router.js";
+import { defaultInferenceModel, inferenceModelCatalog } from "../../../shared/node/inference-router-models.js";
 import { resolveClaudeCodeCliPath } from "../../../shared/node/inference-router-local.js";
 import { getSandRootDir } from "../../host-paths.js";
 import { SandSettingsStore } from "../../../shared/node/settings/sand-settings-store.js";
 import { getBoxSecretsStorePath } from "../secrets/secrets-service.js";
 import { streamCodexDirectResponses, type CodexDirectTool } from "./codex-direct-responses.js";
+import { claudeImagePrompt, codexMessageInput } from "./provider-images.js";
 import type { LabelMessage, PromptExecutor } from "./sand-labeling.js";
 
 type Loose = Record<string, any>;
@@ -56,7 +58,13 @@ function providerPrompt(messages: readonly ProviderMessage[]): string {
   return `${GROK_ROUTER_SYSTEM_PROMPT}\n\nContinue this Grok Bot conversation.\n\n${rendered}`;
 }
 
-function deferred<T>() { return Promise.withResolvers<T>(); }
+function deferred<T>() {
+  const result = Promise.withResolvers<T>();
+  // Stream consumers may never await the metadata promises after a stream
+  // failure. Observe rejection immediately, while preserving it for awaiters.
+  void result.promise.catch(() => undefined);
+  return result;
+}
 
 function response(text: string, id: string, modelId: string) {
   return { id, modelId, timestamp: new Date(), headers: {}, messages: [{ role: "assistant", content: [{ type: "text", text }] }] };
@@ -131,23 +139,24 @@ function codexAuthenticatedFetch(initial: CodexCredentials): typeof fetch {
   };
 }
 
-function configuredCodexModel(): string {
-  const selected = process.env.SAND_CODEX_MODEL?.trim();
-  if (selected) return selected;
-  try {
-    const config = readFileSync(join(process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"), "config.toml"), "utf8");
-    return /^\s*model\s*=\s*["']([^"']+)["']/m.exec(config)?.[1]?.trim() || "gpt-5.4";
-  } catch { return "gpt-5.4"; }
+export function configuredInferenceModel(provider: SandInferenceProvider): string | null {
+  return new SandSettingsStore(join(getSandRootDir(), "settings.json")).getInferenceModel(provider) ?? defaultInferenceModel(provider);
 }
 
-function configuredCodexReasoningEffort(): "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
-  const selected = process.env.SAND_CODEX_REASONING_EFFORT?.trim();
-  if (selected === "minimal" || selected === "low" || selected === "medium" || selected === "high" || selected === "xhigh") return selected;
-  try {
-    const config = readFileSync(join(process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"), "config.toml"), "utf8");
-    const value = /^\s*model_reasoning_effort\s*=\s*["']([^"']+)["']/m.exec(config)?.[1]?.trim();
-    return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh" ? value : undefined;
-  } catch { return undefined; }
+export function configuredInferenceEffort(provider: SandInferenceProvider): SandInferenceEffort | undefined {
+  const settings = new SandSettingsStore(join(getSandRootDir(), "settings.json"));
+  const supported = inferenceModelCatalog(settings.getInferenceModels()).effortOptions[provider];
+  const saved = settings.getInferenceEffort(provider);
+  if (saved != null) return supported.includes(saved) ? saved : undefined;
+  if (provider !== "codex") return undefined;
+  let selected = process.env.SAND_CODEX_REASONING_EFFORT?.trim();
+  if (!selected) {
+    try {
+      const config = readFileSync(join(process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"), "config.toml"), "utf8");
+      selected = /^\s*model_reasoning_effort\s*=\s*["']([^"']+)["']/m.exec(config)?.[1]?.trim();
+    } catch { return undefined; }
+  }
+  return isSandInferenceEffort(selected) && supported.includes(selected) ? selected : undefined;
 }
 
 function codexTools(definitions: readonly Loose[] | undefined): CodexDirectTool[] | undefined {
@@ -170,7 +179,8 @@ function codexExecutor(messages: readonly ProviderMessage[], invocationId: strin
   const extendedUsage = deferred<{ inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; maxTokens: number }>();
   const resultResponse = deferred<ReturnType<typeof response>>();
   const metadata = deferred<Record<string, unknown>>();
-  const model = configuredCodexModel();
+  const model = configuredInferenceModel("codex")!;
+  const fastMode = new SandSettingsStore(join(getSandRootDir(), "settings.json")).getCodexFastMode();
   const tools = codexTools(definitions);
   const fullStream = (async function* () {
     let text = "";
@@ -179,12 +189,13 @@ function codexExecutor(messages: readonly ProviderMessage[], invocationId: strin
         fetch: codexAuthenticatedFetch(credentials),
         endpoint: "https://chatgpt.com/backend-api/codex/responses",
         model,
-        ...(configuredCodexReasoningEffort() == null ? {} : { reasoningEffort: configuredCodexReasoningEffort()! }),
+        fastMode,
+        ...(configuredInferenceEffort("codex") == null ? {} : { reasoningEffort: configuredInferenceEffort("codex")! }),
         instructions: GROK_ROUTER_SYSTEM_PROMPT,
-        input: messages.map(message => ({ role: message.role === "assistant" ? "assistant" : "user", content: typeof message.content === "string" ? message.content : JSON.stringify(message.content) })),
+        input: codexMessageInput(messages),
         ...(tools == null ? {} : { tools }),
         ...(executeTool == null ? {} : { executeTool: async (selected, args, toolCallId) => await executeTool(selected.source, args, toolCallId) }),
-        maxSteps: tools == null ? 1 : 8,
+        maxSteps: tools == null ? 1 : ROUTED_PROVIDER_MAX_STEPS,
       })) {
         if (event.type === "text-delta") { text += event.delta; yield { type: "text-delta" as const, textDelta: event.delta }; continue; }
         const basic = { promptTokens: event.usage.inputTokens, completionTokens: event.usage.outputTokens, totalTokens: event.usage.inputTokens + event.usage.outputTokens };
@@ -202,18 +213,20 @@ function codexExecutor(messages: readonly ProviderMessage[], invocationId: strin
 
 function claudeExecutor(messages: readonly ProviderMessage[], invocationId: string, onUsage?: (usage: UsageRecord) => void, mcpServerUrl?: string) {
   const executable = resolveClaudeCodeCliPath();
-  if (executable == null) throw new Error("Claude Code is not installed. Install and sign in to Claude Code, then reopen Grok Bot.");
+  if (executable == null) throw new Error("Claude Code is not installed. Install and sign in to Claude Code, or select another provider in Settings → Router.");
   const usage = deferred<{ promptTokens: number; completionTokens: number; totalTokens: number }>();
   const extendedUsage = deferred<{ inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; maxTokens: number }>();
   const resultResponse = deferred<ReturnType<typeof response>>();
   const metadata = deferred<Record<string, unknown>>();
   const fullStream = (async function* () {
+    let final: SDKResultMessage | undefined;
     try {
-      let final: SDKResultMessage | undefined;
-      const selectedModel = process.env.SAND_CLAUDE_MODEL?.trim();
-      for await (const message of queryClaude({ prompt: providerPrompt(messages), options: { pathToClaudeCodeExecutable: executable, cwd: getSandRootDir(), allowedTools: mcpServerUrl == null ? [] : ["mcp__grok_bot_plugins"], ...(mcpServerUrl == null ? {} : { mcpServers: { grok_bot_plugins: { type: "http" as const, url: mcpServerUrl } }, strictMcpConfig: true }), permissionMode: "default", maxTurns: mcpServerUrl == null ? 1 : 8, persistSession: false, ...(selectedModel == null || selectedModel.length === 0 ? {} : { model: selectedModel }) } })) if (message.type === "result") final = message;
+      const selectedModel = configuredInferenceModel("claude-code");
+      const effort = configuredInferenceEffort("claude-code");
+      for await (const message of queryClaude({ prompt: claudeImagePrompt(messages, GROK_ROUTER_SYSTEM_PROMPT) ?? providerPrompt(messages), options: { ...(effort == null ? {} : { extraArgs: { effort } }), pathToClaudeCodeExecutable: executable, cwd: getSandRootDir(), allowedTools: mcpServerUrl == null ? [] : ["mcp__grok_bot_plugins"], ...(mcpServerUrl == null ? {} : { mcpServers: { grok_bot_plugins: { type: "http" as const, url: mcpServerUrl } }, strictMcpConfig: true }), permissionMode: "default", maxTurns: mcpServerUrl == null ? 1 : ROUTED_PROVIDER_MAX_STEPS, persistSession: false, ...(selectedModel == null || selectedModel.length === 0 ? {} : { model: selectedModel }) } })) if (message.type === "result") final = message;
       if (final == null) throw new Error("Claude Code ended without a result.");
       if (final.subtype !== "success") throw new Error(final.errors.join("\n") || `Claude Code failed (${final.subtype}).`);
+      if (final.is_error) throw new Error(final.result || "Claude Code returned an API error.");
       const text = final.result;
       if (text.length > 0) yield { type: "text-delta" as const, textDelta: text };
       const input = final.usage.input_tokens, output = final.usage.output_tokens, cacheRead = final.usage.cache_read_input_tokens ?? 0, cacheWrite = final.usage.cache_creation_input_tokens ?? 0;
@@ -222,7 +235,15 @@ function claudeExecutor(messages: readonly ProviderMessage[], invocationId: stri
       extendedUsage.resolve({ inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite, maxTokens: 0 });
       metadata.resolve({ anthropic: { sessionId: final.session_id, totalCostUsd: final.total_cost_usd } });
       resultResponse.resolve(response(text, invocationId, "claude-code"));
-    } catch (error) { usage.reject(error); extendedUsage.reject(error); metadata.reject(error); resultResponse.reject(error); throw error; }
+    } catch (cause) {
+      // A provider may send a useful result, then exit with code 1. Preserve
+      // the actual API error instead of replacing it with the transport exit.
+      const detail = final?.subtype === "success" && final.is_error ? final.result
+        : final != null && final.subtype !== "success" ? final.errors.join("\n")
+        : cause instanceof Error ? cause.message : String(cause);
+      const error = new Error(detail || "Claude Code failed without an error description.", { cause });
+      usage.reject(error); extendedUsage.reject(error); metadata.reject(error); resultResponse.reject(error); throw error;
+    }
   })();
   return { fullStream, response: resultResponse.promise, usage: usage.promise, extendedUsage: extendedUsage.promise, providerMetadata: metadata.promise, invocationId: Promise.resolve(invocationId) };
 }
@@ -245,10 +266,11 @@ function toToolSet(definitions: readonly Loose[] | undefined, executeTool?: Rout
 }
 
 function openRouterExecutor(messages: readonly ProviderMessage[], invocationId: string, definitions?: readonly Loose[], executeTool?: RoutedToolExecutor, onUsage?: (usage: UsageRecord) => void) {
-  const id = process.env.SAND_OPENROUTER_MODEL?.trim() || "openai/gpt-5.2";
-  const model: LanguageModelV1 = createOpenAI({ apiKey: openRouterCredential(), baseURL: "https://openrouter.ai/api/v1", compatibility: "compatible", name: "openrouter", headers: { "HTTP-Referer": "https://github.com/grok-bot-reconstructed", "X-Title": "Grok Bot Reconstructed" } }).chat(id as any);
+  const id = configuredInferenceModel("openrouter")!;
+  const effort = configuredInferenceEffort("openrouter");
+  const model: LanguageModelV1 = createOpenAI({ apiKey: openRouterCredential(), baseURL: "https://openrouter.ai/api/v1", compatibility: "compatible", name: "openrouter", headers: { "HTTP-Referer": "https://github.com/grok-bot-reconstructed", "X-Title": "Grok Bot Reconstructed" } }).chat(id as any, effort === "low" || effort === "medium" || effort === "high" ? { reasoningEffort: effort } : {});
   const tools = toToolSet(definitions, executeTool);
-  const result = streamText({ model, system: GROK_ROUTER_SYSTEM_PROMPT, messages: messages as CoreMessage[], ...(tools === undefined ? {} : { tools }), toolCallStreaming: true, maxSteps: tools === undefined ? 1 : 8 });
+  const result = streamText({ model, system: GROK_ROUTER_SYSTEM_PROMPT, messages: messages as CoreMessage[], ...(tools === undefined ? {} : { tools }), toolCallStreaming: true, maxSteps: tools === undefined ? 1 : ROUTED_PROVIDER_MAX_STEPS });
   const extendedUsage = result.usage.then(value => ({ inputTokens: value.promptTokens, outputTokens: value.completionTokens, cacheReadTokens: 0, cacheWriteTokens: 0, maxTokens: 0 }));
   if (onUsage != null) void extendedUsage.then(onUsage);
   return { fullStream: result.fullStream, response: result.response, usage: result.usage, extendedUsage, providerMetadata: result.providerMetadata, invocationId: Promise.resolve(invocationId) };
@@ -264,7 +286,7 @@ class ProviderPromptExecutor extends BasePromptExecutor<ProviderMessage> {
 }
 
 export function createProviderPromptSession(provider: RoutedProvider): { getModelId(): string; getExecutor(state?: unknown): PromptExecutor } {
-  const modelId = provider === "codex" ? configuredCodexModel() : provider === "claude-code" ? "claude-code" : process.env.SAND_OPENROUTER_MODEL?.trim() || "openai/gpt-5.2";
+  const modelId = provider === "codex" ? configuredInferenceModel("codex")! : provider === "claude-code" ? configuredInferenceModel("claude-code") ?? "claude-code" : configuredInferenceModel("openrouter")!;
   return { getModelId: () => modelId, getExecutor: state => new ProviderPromptExecutor(provider, Array.isArray(state) ? state as ProviderMessage[] : undefined, usage => recordRoutedUsage(provider, usage)) };
 }
 

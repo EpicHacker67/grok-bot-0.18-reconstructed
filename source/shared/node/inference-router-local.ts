@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -40,7 +41,19 @@ function hasUsableCodexLogin(path: string): boolean {
   } catch { return false; }
 }
 
-export function getLocalInferenceCliStatus(): { readonly codex: LocalInferenceCliStatus; readonly "claude-code": LocalInferenceCliStatus } {
+async function claudeLoginStatus(executable: string | null): Promise<boolean> {
+  if (executable == null) return false;
+  return await new Promise(resolve => {
+    execFile(executable, ["auth", "status"], { timeout: 5_000, maxBuffer: 64_000 }, (_error, stdout) => {
+      // Native macOS Claude Code keeps OAuth credentials in Keychain, rather
+      // than .credentials.json. Ask the CLI without reading or copying tokens.
+      try { const result = JSON.parse(stdout); if (typeof result.loggedIn === "boolean") { resolve(result.loggedIn); return; } } catch { /* Older CLIs may not support auth status. */ }
+      resolve(existsSync(join(homedir(), ".claude", ".credentials.json")) || (process.env.ANTHROPIC_API_KEY?.length ?? 0) > 0);
+    });
+  });
+}
+
+export async function getLocalInferenceCliStatus(): Promise<{ readonly codex: LocalInferenceCliStatus; readonly "claude-code": LocalInferenceCliStatus }> {
   const home = homedir();
   const codexPath = resolveCodexCliPath();
   const claudePath = resolveClaudeCodeCliPath();
@@ -51,6 +64,6 @@ export function getLocalInferenceCliStatus(): { readonly codex: LocalInferenceCl
     // Codex inference is a Grok Bot-owned HTTP transport authenticated by the
     // existing Codex login. The CLI binary is not in the request path.
     codex: { installed: hasCodexAuthFile, authenticated: hasCodexLogin, executablePath: codexPath },
-    "claude-code": { installed: claudePath != null, authenticated: existsSync(join(home, ".claude", ".credentials.json")) || (process.env.ANTHROPIC_API_KEY?.length ?? 0) > 0, executablePath: claudePath },
+    "claude-code": { installed: claudePath != null, authenticated: await claudeLoginStatus(claudePath), executablePath: claudePath },
   };
 }

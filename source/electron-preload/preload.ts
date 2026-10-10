@@ -261,7 +261,7 @@ export function createDesktopPreloadBridge(options: {
       setComputerUseModel: (model: unknown) => edge("setComputerUseModel", { model }),
       getAvailableModels: () => edge("getAvailableModels"),
       getInferenceRouter: () => edge("getInferenceRouter"),
-      setInferenceRouter: (provider: string) => edge("setInferenceRouter", { provider }),
+      setInferenceRouter: (provider: string, model?: string | null, effort?: string | null, fastMode?: boolean) => edge("setInferenceRouter", { provider, ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }), ...(fastMode === undefined ? {} : { fastMode }) }),
       getBoxRuntime: () => edge("getBoxRuntime"),
       setBoxRuntime: (mode: string) => edge("setBoxRuntime", { mode }),
       clientPersistence: {

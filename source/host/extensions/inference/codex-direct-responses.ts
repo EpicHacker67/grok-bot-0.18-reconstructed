@@ -1,3 +1,5 @@
+import { ROUTED_PROVIDER_MAX_STEPS } from "../../../shared/inference-router.js";
+
 type Loose = Record<string, any>;
 
 export type CodexDirectUsage = {
@@ -22,7 +24,8 @@ export type CodexDirectOptions = {
   readonly fetch: typeof fetch;
   readonly endpoint: string;
   readonly model: string;
-  readonly reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  readonly fastMode?: boolean;
+  readonly reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   readonly instructions: string;
   readonly input: readonly Loose[];
   readonly tools?: readonly CodexDirectTool[];
@@ -109,7 +112,7 @@ function requestTools(tools: readonly CodexDirectTool[] | undefined): Loose[] | 
 }
 
 export async function* streamCodexDirectResponses(options: CodexDirectOptions): AsyncGenerator<CodexDirectEvent> {
-  const maxSteps = options.maxSteps ?? 8;
+  const maxSteps = options.maxSteps ?? ROUTED_PROVIDER_MAX_STEPS;
   const toolsByName = new Map((options.tools ?? []).map(tool => [tool.name, tool]));
   let input: Loose[] = options.input.map(item => ({ ...item }));
   let text = "";
@@ -123,6 +126,8 @@ export async function* streamCodexDirectResponses(options: CodexDirectOptions): 
       headers: { "content-type": "application/json", accept: "text/event-stream", "user-agent": "grok-bot-router/1" },
       body: JSON.stringify({
         model: options.model,
+        // Match Codex's Fast service tier without changing reasoning effort.
+        service_tier: options.fastMode === true ? "priority" : "default",
         instructions: options.instructions,
         input,
         ...(declaredTools == null ? {} : { tools: declaredTools, tool_choice: "auto", parallel_tool_calls: true }),
@@ -179,5 +184,5 @@ export async function* streamCodexDirectResponses(options: CodexDirectOptions): 
     }
     input = [...input, ...output.map(item => record(item) ?? {}), ...results];
   }
-  throw new Error(`Codex exceeded Grok Bot's ${maxSteps}-step tool limit.`);
+  throw new Error(`Codex reached Mengel's ${maxSteps}-round limit for this request before finishing.`);
 }

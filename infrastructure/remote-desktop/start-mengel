@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+# Configure audio before any Chrome worker can cache a missing sound device.
+sh /usr/local/lib/mengel/audio-setup.sh
+# The supervisor owns desktop startup; this service is independent of its UI.
+# Restart the media process if it exits. Docker stops the entire tree on shutdown.
+(
+  while :; do
+    /usr/local/bin/box-bounded-log --run /tmp/mengel-media.log -- /usr/local/bin/mengel-desktop-stream || true
+    sleep 2
+  done
+) &
+exec /usr/local/bin/start-sand-box "$@"

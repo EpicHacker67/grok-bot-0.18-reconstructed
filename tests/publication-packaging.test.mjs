@@ -50,7 +50,7 @@ test("Router settings use the trusted backend and display recorded inference usa
   const mcpBridge = await readFile(path.join(repoRoot, "source", "node-agent-coordinator", "routed-mcp-bridge.ts"), "utf8");
   const localDocker = await readFile(path.join(repoRoot, "source", "electron-main", "box", "local-docker-host-connector.ts"), "utf8");
   assert.match(rendererPatch, /desktop\.agent\.getInferenceRouter\(\)/);
-  assert.match(rendererPatch, /desktop\.agent\.setInferenceRouter\(n\)/);
+  assert.match(rendererPatch, /desktop\.agent\.setInferenceRouter\(n,m,f,fast\)/);
   assert.match(rendererPatch, /desktop\.agent\.getBoxRuntime\(\)/);
   assert.match(rendererPatch, /desktop\.agent\.setBoxRuntime\(r\)/);
   assert.match(rendererPatch, /role:"switch"/);
@@ -67,13 +67,13 @@ test("Router settings use the trusted backend and display recorded inference usa
   assert.match(preload, /getInferenceRouter: \(\) => edge\("getInferenceRouter"\)/);
   assert.match(preload, /getBoxRuntime: \(\) => edge\("getBoxRuntime"\)/);
   assert.match(preload, /setBoxRuntime: \(mode: string\) => edge\("setBoxRuntime", \{ mode \}\)/);
-  assert.match(mainEdge, /syncHostSettingsToBox\(\{ inferenceProvider: provider \}\)/);
+  assert.match(mainEdge, /syncHostSettingsToBox\(\{ inferenceProvider: provider, inferenceModels: models, inferenceEfforts: efforts, codexFastMode \}\)/);
   assert.match(mainEdge, /invoke\(deps\.settingsStore, "setInferenceProvider", provider\)/);
-  assert.match(mainEdge, /return \{ provider, usage:/);
+  assert.match(mainEdge, /return \{ provider, models, efforts, codexFastMode, \.\.\.inferenceModelCatalog\(models, await loadClaudeModelCatalog\(\)\), usage:/);
   assert.match(mainEdge, /invoke\(deps\.boxRecovery, "restartCoordinator"\)/);
   assert.match(mainEdge, /mode === "local-docker"\) await startLocalDockerBox\(settingsPath\); else await stopLocalDockerBox\(\)/);
   assert.match(mainEdge, /setBoxRuntime", mode === "local-docker" \? "remote" : "local-docker"/);
-  assert.match(localDocker, /public\.ecr\.aws\/k0i0n2g5\/cursorenvironments\/universal:sand-box-latest/);
+  assert.match(localDocker, /public\.ecr\.aws\/k0i0n2g5\/cursorenvironments\/universal@sha256:[a-f0-9]{64}/);
   assert.match(localDocker, /"127\.0\.0\.1:1340:1340"/);
   assert.match(localDocker, /SAND_BOX_AUTO_UPDATE=0/);
   assert.match(localDocker, /dst=\/home\/box\/sand-host\/host-main\.cjs,readonly/);
@@ -111,7 +111,7 @@ test("Router settings use the trusted backend and display recorded inference usa
   assert.match(mcpBridge, /openWorldHint: !readOnly/);
   assert.match(coordinator, /schemaVersion: 2/);
   assert.match(coordinator, /\["getAgentTranscriptTail", "openAgentTail", "getAgentTranscriptWindow"\]/);
-  assert.match(coordinator, /\.map\(projectInferenceRouterTranscriptEntry\)/);
+  assert.match(coordinator, /\.flatMap\(entry => \[\.\.\.projectInferenceRouterAttachments\(entry\), projectInferenceRouterTranscriptEntry\(entry\)\]\)/);
   assert.match(coordinator, /readonly richText\?: string/);
   assert.match(coordinator, /richText: entry\.richText/);
   assert.match(coordinator, /setTimeout\(resolve, 1_200\)/);
