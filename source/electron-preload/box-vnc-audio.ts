@@ -1,15 +1,17 @@
 import { VNC_VIEWER_VISIBLE_CHANNEL } from "../shared/vnc-viewer-visibility.js";
 
+export type AudioPlaybackTarget = Pick<HTMLMediaElement, "muted" | "volume" | "play">;
+
 export interface RemoteAudioEdge {
   startAudio(): Promise<{ supported: boolean; started?: boolean }>;
   readAudio(): Promise<{ bytes: Uint8Array; error: string | null }>;
   stopAudio(): Promise<unknown>;
 }
 
-export function installRemoteAudio(edge: RemoteAudioEdge, renderer: { on(channel: string, listener: (event: unknown, value: unknown) => void): void }): { prepareMediaElement(media: HTMLVideoElement): void; setMediaElement(media: HTMLVideoElement | null): void } | undefined {
+export function installRemoteAudio(edge: RemoteAudioEdge, renderer: { on(channel: string, listener: (event: unknown, value: unknown) => void): void }): { prepareMediaElement(media: AudioPlaybackTarget): void; setMediaElement(media: AudioPlaybackTarget | null): void } | undefined {
   if (!location.pathname.endsWith("/vnc.html") || new URLSearchParams(location.search).get("sandInteractive") !== "1") return;
   let visible = false;
-  let media: HTMLVideoElement | null = null;
+  let media: AudioPlaybackTarget | null = null;
   let enabled = true;
   try { enabled = localStorage.getItem("mengel-remote-sound") !== "muted"; } catch {}
   let volume = 1;

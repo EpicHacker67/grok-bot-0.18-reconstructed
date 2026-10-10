@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/pion/ice/v4"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -116,6 +118,15 @@ func (s *server) offer(w http.ResponseWriter, r *http.Request) {
 	}
 	s.sessions[id] = v
 	s.mu.Unlock()
+	var audioChannel atomic.Pointer[webrtc.DataChannel]
+	pc.OnDataChannel(func(channel *webrtc.DataChannel) {
+		if channel.Label() != "mengel-audio-v1" || channel.Ordered() || channel.MaxRetransmits() == nil || *channel.MaxRetransmits() != 0 {
+			channel.Close()
+			return
+		}
+		channel.OnOpen(func() { audioChannel.Store(channel) })
+		channel.OnClose(func() { audioChannel.CompareAndSwap(channel, nil) })
+	})
 	ports := make([]int, 0, 2)
 	for _, kind := range []string{"video", "audio"} {
 		codec := webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"}
@@ -156,6 +167,23 @@ func (s *server) offer(w http.ResponseWriter, r *http.Request) {
 				n, _, e := socket.ReadFromUDP(buf)
 				if e != nil {
 					return
+				}
+				if kind == "audio" {
+					// BufferedAmount includes in-flight bytes until SCTP acknowledges them.
+					// Allow normal RTT/ACK batching at 128 kbps; a tiny cap starves
+					// voiced audio. The receiver separately rejects stale packets.
+					if channel := audioChannel.Load(); channel != nil && channel.ReadyState() == webrtc.DataChannelStateOpen && channel.BufferedAmount() < 8192 {
+						var packet rtp.Packet
+						if packet.Unmarshal(buf[:n]) == nil {
+							// Unordered/unreliable delivery cannot queue retransmitted old sound.
+							// Keep RTP sample time and sequence for loss/reordering detection.
+							data := make([]byte, 6+len(packet.Payload))
+							binary.BigEndian.PutUint32(data, packet.Timestamp)
+							binary.BigEndian.PutUint16(data[4:], packet.SequenceNumber)
+							copy(data[6:], packet.Payload)
+							_ = channel.Send(data)
+						}
+					}
 				}
 				if _, e = track.Write(buf[:n]); e != nil && ctx.Err() != nil {
 					return
@@ -259,13 +287,16 @@ func (s *server) offer(w http.ResponseWriter, r *http.Request) {
 
 // Separate live inputs keep PulseAudio startup and clock correction from
 // back-pressuring video capture. WebRTC clocks each RTP track independently.
+// Pulse timing corrections are not a sample clock: forwarding those timestamps
+// creates holes/overlaps between Opus packets and inflates browser jitter buffers.
+// Ten-ms capture blocks and sample-count PTS yield continuous 480-sample packets.
 func captureArgs(videoPort, audioPort int) [][]string {
 	return [][]string{
 		{"-hide_banner", "-loglevel", "warning", "-nostdin", "-filter_threads", "2", "-stats_period", "1", "-progress", "pipe:1",
 			"-thread_queue_size", "4", "-f", "x11grab", "-draw_mouse", "0", "-framerate", "60", "-video_size", "1920x1080", "-i", ":2",
 			"-an", "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull", "-profile:v", "baseline", "-pix_fmt", "yuv420p", "-rc", "cbr", "-b:v", "10M", "-maxrate", "10M", "-bufsize", "1M", "-g", "60", "-bf", "0", "-zerolatency", "1", "-delay", "0", "-fps_mode", "passthrough", "-f", "rtp", "-payload_type", "96", fmt.Sprintf("rtp://127.0.0.1:%d?pkt_size=1200", videoPort)},
-		{"-hide_banner", "-loglevel", "warning", "-nostdin", "-thread_queue_size", "32", "-f", "pulse", "-fragment_size", "3840", "-i", "mengel_output.monitor",
-			"-vn", "-c:a", "libopus", "-application", "lowdelay", "-frame_duration", "10", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-f", "rtp", "-payload_type", "111", fmt.Sprintf("rtp://127.0.0.1:%d?pkt_size=1200", audioPort)},
+		{"-hide_banner", "-loglevel", "warning", "-nostdin", "-thread_queue_size", "4", "-f", "pulse", "-sample_rate", "48000", "-channels", "2", "-fragment_size", "1920", "-i", "mengel_output.monitor",
+			"-vn", "-af", "asetpts=N/SR/TB", "-c:a", "libopus", "-application", "lowdelay", "-frame_duration", "10", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-f", "rtp", "-payload_type", "111", fmt.Sprintf("rtp://127.0.0.1:%d?pkt_size=1200", audioPort)},
 	}
 }
 func main() {

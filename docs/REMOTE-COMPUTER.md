@@ -94,8 +94,15 @@ memory allocation. The headless compositor redraws without physical-display
 VSync or frame pacing, which otherwise repeats stale frames. Video and audio
 have separate capture processes so PulseAudio startup cannot stall video. They
 also use separate WebRTC stream IDs: desktop video stays responsive instead of
-waiting for the audio jitter buffer. This favors interaction latency over strict
-audio/video synchronization.
+waiting for the audio jitter buffer. Audio capture uses continuous 48 kHz sample
+timestamps and 10 ms Opus frames. Current clients receive those frames on an
+unordered WebRTC data channel without retransmission, decode with WebCodecs, and
+schedule playback against their capture times. The playback target is 120 ms
+with a 150 ms queue ceiling; stale packets and decoder backlogs are discarded.
+These limits exclude capture, network, and device output latency. They reduce
+accumulating audio delay without adding video/input delay, but long network gaps
+can still cause short audio dropouts. Older clients or unavailable decoders use
+the standard RTP audio track, whose adaptive buffering can be longer.
 A private Go/Pion service captures the desktop at 60 fps,
 encodes H.264 using NVENC, and sends video plus Opus audio over WebRTC. Mengel enables hardware decoding and compositing on the Mac. The app
 keeps VNC for input, clipboard, previews, and automatic fallback. Its existing
@@ -124,7 +131,11 @@ connectivity the viewer falls back to the existing SSH-tunneled VNC path.
 The standalone `verify-client.cjs` runs a disposable Electron receiver on the
 Mac. Its default target is the isolated `mengel-gpu-preview` validation container;
 it writes frame statistics and a screenshot under `/tmp/mengel-stream-*`.
-Run the Go service's authentication and cleanup tests with `go test -race ./...`
+Set `MENGEL_TEST_PACKET_AUDIO=1` to exercise the bounded audio receiver;
+`MENGEL_TEST_CONTAINER=grok-bot-local-vm` selects the live container.
+`audio-sync-check.html` provides a finite tone/flash test with an immediate pause
+button.
+Run the Go service's authentication, capture-clock, and cleanup tests with `go test -race ./...`
 from `infrastructure/remote-desktop/streamer`.
 
 The authenticated `/health` endpoint on container loopback port 8840 also reports

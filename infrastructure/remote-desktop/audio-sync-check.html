@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><title>Mengel audio sync check</title>
+<style>body{margin:0;background:#111;color:#aaa;font:24px system-ui}header{padding:30px;background:#222}button{font:inherit;margin:10px;padding:10px}#signal{position:fixed;inset:260px 0 0;background:#111}</style>
+<header>Audio sync check · white means tone, dark means silence<br><button id="start">Start 45-second check</button><button id="pause">Pause now</button><span id="state">Stopped</span></header><div id="signal"></div>
+<script>
+let ctx,osc,gain,begin=0,end=0,running=false;
+function stop(){if(!ctx)return;gain.gain.cancelScheduledValues(ctx.currentTime);gain.gain.setValueAtTime(0,ctx.currentTime);running=false;signal.style.background='#111';state.textContent='Paused'}
+pause.onclick=stop;
+start.onclick=async()=>{ctx??=new AudioContext({latencyHint:'interactive'});await ctx.resume();if(!osc){osc=ctx.createOscillator();osc.frequency.value=600;gain=ctx.createGain();gain.gain.value=0;osc.connect(gain).connect(ctx.destination);osc.start()}stop();begin=ctx.currentTime+.2;end=begin+45;for(let t=begin;t<end;t+=2){gain.gain.setValueAtTime(.035,t);gain.gain.setValueAtTime(0,t+.7)}running=true;state.textContent='Running';};
+function frame(){if(running){let t=ctx.getOutputTimestamp().contextTime;if(t>=end)stop();else signal.style.background=t>=begin&&(t-begin)%2<.7?'white':'#111'}requestAnimationFrame(frame)}frame();
+window.addEventListener('pagehide',()=>{stop();ctx?.close()});
+</script>

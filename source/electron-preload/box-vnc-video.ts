@@ -1,3 +1,5 @@
+import { createPacketAudio } from "./box-vnc-packet-audio.js";
+import type { AudioPlaybackTarget } from "./box-vnc-audio.js";
 import { VNC_VIEWER_VISIBLE_CHANNEL } from "../shared/vnc-viewer-visibility.js";
 export interface RemoteVideoEdge {
   startVideo(offer: { type: string; sdp: string }): Promise<{ supported: boolean; type?: "answer"; sdp?: string }>;
@@ -6,16 +8,18 @@ export interface RemoteVideoEdge {
 
 // VNC retains keyboard, mouse, clipboard, and the fallback image. The video is
 // aligned to its canvas and never intercepts input or the volume controls.
-export function installRemoteVideo(edge: RemoteVideoEdge, renderer: { on(channel: string, fn: (event: unknown, value: unknown) => void): void }, audio: { prepareMediaElement(media: HTMLVideoElement): void; setMediaElement(media: HTMLVideoElement | null): void } | undefined): void {
+export function installRemoteVideo(edge: RemoteVideoEdge, renderer: { on(channel: string, fn: (event: unknown, value: unknown) => void): void }, audio: { prepareMediaElement(media: HTMLVideoElement): void; setMediaElement(media: AudioPlaybackTarget | null): void } | undefined): void {
   if (!location.pathname.endsWith("/vnc.html") || new URLSearchParams(location.search).get("sandInteractive") !== "1") return;
   let visible = false, generation = 0, peer: RTCPeerConnection | null = null, element: HTMLVideoElement | null = null;
   let watchdog: ReturnType<typeof setInterval> | null = null, retry: ReturnType<typeof setTimeout> | null = null;
   let observer: ResizeObserver | null = null;
+  let packetAudio: ReturnType<typeof createPacketAudio> = null;
   const status = (value: string) => { document.documentElement.dataset.mengelStream = value; };
   const stop = () => {
     generation++; if (watchdog) clearInterval(watchdog); watchdog = null;
     if (retry) clearTimeout(retry); retry = null;
     observer?.disconnect(); observer = null;
+    packetAudio?.close(); packetAudio = null;
     peer?.close(); peer = null;
     if (element) { audio?.setMediaElement(null); element.pause(); element.srcObject = null; element.remove(); element = null; }
     void edge.stopVideo().catch(() => {}); status("vnc");
@@ -37,6 +41,12 @@ export function installRemoteVideo(edge: RemoteVideoEdge, renderer: { on(channel
       Object.assign(video.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
     };
     observer = new ResizeObserver(align); observer.observe(document.body);
+    const packet = audio ? createPacketAudio(pc, target => {
+      if (current !== generation) return;
+      if (target) { video.muted = true; audio.setMediaElement(target); }
+      else audio.setMediaElement(video);
+    }) : null;
+    packetAudio = packet;
     const stream = new MediaStream();
     pc.addTransceiver("video", { direction: "recvonly" }); pc.addTransceiver("audio", { direction: "recvonly" });
     pc.ontrack = event => {
@@ -44,6 +54,7 @@ export function installRemoteVideo(edge: RemoteVideoEdge, renderer: { on(channel
       stream.addTrack(event.track); video.srcObject = stream; void video.play().catch(() => {});
     };
     let ready = false, lastFrames = 0, lastTime = performance.now(), lastProgress = performance.now();
+    let previousAudio: { count: number; delay: number; target: number } | null = null;
     const fail = () => {
       if (current !== generation) return;
       stop();
@@ -53,16 +64,26 @@ export function installRemoteVideo(edge: RemoteVideoEdge, renderer: { on(channel
     video.addEventListener("playing", () => {
       if (current !== generation) return;
       align(); video.style.opacity = "1"; ready = true; lastProgress = performance.now();
-      audio?.setMediaElement(video); status("webrtc");
+      audio?.setMediaElement(packet?.active ? packet.target : video); if (packet?.active) video.muted = true; status("webrtc");
     }, { once: true });
     watchdog = setInterval(async () => {
       if (current !== generation) return;
       align();
       try {
+        document.documentElement.dataset.mengelPacketAudio = JSON.stringify(packet?.stats() ?? null);
         const stats = await pc.getStats();
         stats.forEach(report => {
           if (report.type === "inbound-rtp" && report.kind === "audio") {
-            document.documentElement.dataset.mengelAudioStats = JSON.stringify({ energy: report.totalAudioEnergy, samples: report.totalSamplesReceived, concealed: report.concealedSamples, packetsLost: report.packetsLost });
+            const sample = { count: report.jitterBufferEmittedCount ?? 0, delay: report.jitterBufferDelay ?? 0, target: report.jitterBufferTargetDelay ?? 0 };
+            const count = sample.count - (previousAudio?.count ?? 0);
+            document.documentElement.dataset.mengelAudioStats = JSON.stringify({
+              energy: report.totalAudioEnergy, samples: report.totalSamplesReceived,
+              concealed: report.concealedSamples, packetsLost: report.packetsLost,
+              bufferMs: count > 0 ? Math.round(10000 * (sample.delay - (previousAudio?.delay ?? 0)) / count) / 10 : null,
+              targetBufferMs: count > 0 ? Math.round(10000 * (sample.target - (previousAudio?.target ?? 0)) / count) / 10 : null,
+              jitterMs: Math.round(1000 * (report.jitter ?? 0)),
+            });
+            previousAudio = sample;
           }
           if (report.type !== "inbound-rtp" || report.kind !== "video") return;
           const now = performance.now(), frames = Number(report.framesDecoded ?? 0);
