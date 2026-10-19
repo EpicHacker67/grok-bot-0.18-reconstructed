@@ -13,6 +13,7 @@ type StoredEntry = {
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly richText?: string;
+  readonly attachments?: readonly { path: string; name: string }[];
   readonly id: string;
   readonly clientNonce?: string;
   readonly reactions?: readonly { readonly emoji: string; readonly by: string }[];
@@ -37,6 +38,7 @@ export function parseInferenceRouterTranscriptStore(value: unknown): Store {
       const row = asRecord(raw);
       if (row == null || !["codex", "claude-code", "openrouter"].includes(String(row.provider)) || !["user", "assistant"].includes(String(row.role)) || typeof row.content !== "string" || typeof row.id !== "string" || typeof row.timestampMs !== "number" || (row.clientNonce !== undefined && typeof row.clientNonce !== "string") || (row.richText !== undefined && typeof row.richText !== "string")) continue;
       if (row.reactions !== undefined && (!Array.isArray(row.reactions) || row.reactions.some(reaction => asRecord(reaction) == null || typeof asRecord(reaction)!.emoji !== "string" || typeof asRecord(reaction)!.by !== "string"))) continue;
+      if (row.attachments !== undefined && (!Array.isArray(row.attachments) || row.attachments.some(item => typeof asRecord(item)?.path !== "string" || typeof asRecord(item)?.name !== "string"))) continue;
       entries.push(row as unknown as StoredEntry);
     }
     agents[agentId] = entries.slice(-200);
@@ -48,6 +50,14 @@ export function projectInferenceRouterTranscriptEntry(entry: StoredEntry): Recor
   return entry.role === "user"
     ? { kind: "message", id: entry.id, role: "user", content: entry.content, ...(entry.richText === undefined ? {} : { richText: entry.richText }), isStreaming: false, timestampMs: entry.timestampMs, ...(entry.clientNonce === undefined ? {} : { clientNonce: entry.clientNonce }), ...(entry.reactions === undefined ? {} : { reactions: entry.reactions }) }
     : { kind: "send-message", id: entry.id, message: { type: "text", content: entry.content }, timestampMs: entry.timestampMs, ...(entry.reactions === undefined ? {} : { reactions: entry.reactions }) };
+}
+
+export function projectInferenceRouterAttachments(entry: StoredEntry): Record<string, unknown>[] {
+  return (entry.attachments ?? []).map((attachment, index) => ({
+    kind: "user-attachment", id: `${entry.id}a${index}`, file_path: attachment.path,
+    file_name: attachment.name, batchId: entry.id, timestampMs: entry.timestampMs,
+    ...(entry.clientNonce === undefined ? {} : { clientNonce: entry.clientNonce }),
+  }));
 }
 
 export function createCoordinatorInferenceRouter(options: {
@@ -122,9 +132,12 @@ export function createCoordinatorInferenceRouter(options: {
   const execute = async (provider: Exclude<SandInferenceProvider, "cursor">, args: Record<string, unknown>) => {
     const agentId = typeof args.agentId === "string" ? args.agentId : "";
     const prompt = typeof args.prompt === "string" ? args.prompt : "";
+    const attachmentPaths = Array.isArray(args.attachmentPaths) ? args.attachmentPaths.filter((path): path is string => typeof path === "string" && path.length > 0) : [];
+    const attachmentNames = Array.isArray(args.attachmentNames) ? args.attachmentNames : [];
+    const attachments = attachmentPaths.map((path, index) => ({ path, name: typeof attachmentNames[index] === "string" ? attachmentNames[index] as string : path.split("/").at(-1)! }));
     const richText = typeof args.richText === "string" ? args.richText : undefined;
     const clientNonce = typeof args.clientNonce === "string" ? args.clientNonce : randomUUID();
-    if (agentId.length === 0 || prompt.length === 0) throw new Error("Local inference routing requires an agentId and prompt");
+    if (agentId.length === 0 || (prompt.length === 0 && attachments.length === 0)) throw new Error("Local inference routing requires an agentId and prompt");
     const timestampMs = now();
     const [remote, beforeUser] = await Promise.all([options.dispatchRemote("getAgentTranscriptTail", { id: agentId }), load()]);
     const remoteEntries = Array.isArray(asRecord(remote)?.entries) ? asRecord(remote)!.entries as unknown[] : [];
@@ -139,7 +152,9 @@ export function createCoordinatorInferenceRouter(options: {
     }, -1);
     const turn = Math.max(remoteTurn, localTurn) + 1;
     const userEntry = { kind: "message", id: `t${turn}u`, role: "user", content: prompt, ...(richText === undefined ? {} : { richText }), isStreaming: false, timestampMs, clientNonce };
-    const withUser = await append(agentId, [{ provider, role: "user", content: prompt, ...(richText === undefined ? {} : { richText }), id: userEntry.id, clientNonce, timestampMs }]);
+    const storedUser: StoredEntry = { provider, role: "user", content: prompt, ...(attachments.length === 0 ? {} : { attachments }), ...(richText === undefined ? {} : { richText }), id: userEntry.id, clientNonce, timestampMs };
+    const withUser = await append(agentId, [storedUser]);
+    for (const attachment of projectInferenceRouterAttachments(storedUser)) emitTranscript(agentId, "appended", attachment);
     emitTranscript(agentId, "appended", userEntry);
     const endActivity = await beginActivity(agentId);
     // The shipped transcript intentionally suppresses its activity row as soon as
@@ -150,7 +165,6 @@ export function createCoordinatorInferenceRouter(options: {
     // so keep the composing state authoritative long enough for a clearly
     // perceptible rendered interval before normal token streaming begins.
     await new Promise<void>(resolve => setTimeout(resolve, 1_200));
-    const messages = (withUser.agents[agentId] ?? []).map(entry => ({ role: entry.role, content: entry.content }));
     let content: string;
     const assistantTimestampMs = now();
     const assistantId = `t${turn}s0`;
@@ -164,26 +178,52 @@ export function createCoordinatorInferenceRouter(options: {
     // (shell, screenshot, browser, click/type) to the routed agent so it can
     // drive the box the way the native agent drives the cloud computer.
     const boxTools = settings.getBoxRuntime() === "local-docker" ? createBoxComputerTools() : null;
-    const bridge = provider === "claude-code" ? await createRoutedMcpBridge({
-      listTools: () => options.dispatchRemote("listRoutedMcpTools", {}),
-      callTool: tool => options.dispatchRemote("executeRoutedMcpTool", { ...tool, agentId }),
-      ...(boxTools == null ? {} : { boxTools }),
-    }) : null;
-    const directTools = bridge == null ? await options.dispatchRemote("listRoutedMcpTools", {}) : undefined;
-    const tools = Array.isArray(directTools) ? directTools as Record<string, any>[] : undefined;
-    const onTextDelta = (_delta: string, accumulated: string) => emitAssistant(accumulated, true);
-    try { content = await runRoutedProviderText(provider, messages, bridge == null ? {
-      ...(tools === undefined ? {} : { tools }),
-      executeTool: async (definition, toolArgs, toolCallId) => await options.dispatchRemote("executeRoutedMcpTool", {
-        providerIdentifier: definition.providerIdentifier,
-        name: definition.name,
-        toolName: definition.toolName,
-        args: toolArgs,
-        toolCallId,
-        agentId,
-      }),
-      onTextDelta,
-    } : { mcpServerUrl: bridge.url, onTextDelta }); }
+    let bridge: Awaited<ReturnType<typeof createRoutedMcpBridge>> | null = null;
+    try {
+      // The attachment bytes live on the isolated host, not on this Mac.
+      // Reload them for follow-ups; persist paths in the transcript, never base64.
+      const messages = await Promise.all((withUser.agents[agentId] ?? []).map(async entry => {
+        if (!entry.attachments?.length) return { role: entry.role, content: entry.content };
+        const content: unknown[] = entry.content.length ? [{ type: "text", text: entry.content }] : [];
+        for (const attachment of entry.attachments) {
+          const image = asRecord(await options.dispatchRemote("readAttachmentImage", { path: attachment.path }));
+          if (typeof image?.dataUrl === "string") {
+            content.push({ type: "text", text: `Attached image: ${attachment.name}` }, { type: "image", image: image.dataUrl });
+          } else {
+            const text = asRecord(await options.dispatchRemote("readAttachmentText", { path: attachment.path }));
+            if (typeof text?.text === "string") content.push({ type: "text", text: `Attached file: ${attachment.name}\n${text.text}` });
+            else content.push({ type: "text", text: `Attached file: ${attachment.name} (on the remote computer at ${attachment.path}; use computer tools to inspect it).` });
+          }
+        }
+        return { role: entry.role, content };
+      }));
+      bridge = provider === "claude-code" ? await createRoutedMcpBridge({
+        listTools: () => options.dispatchRemote("listRoutedMcpTools", {}),
+        callTool: tool => options.dispatchRemote("executeRoutedMcpTool", { ...tool, agentId }),
+        ...(boxTools == null ? {} : { boxTools }),
+      }) : null;
+      const directTools = bridge == null ? await options.dispatchRemote("listRoutedMcpTools", {}) : undefined;
+      const computerTools = boxTools?.list() ?? [];
+      const tools = [...(Array.isArray(directTools) ? directTools as Record<string, any>[] : []), ...computerTools];
+      const onTextDelta = (_delta: string, accumulated: string) => emitAssistant(accumulated, true);
+      content = await runRoutedProviderText(provider, messages, bridge == null ? {
+        tools,
+        executeTool: async (definition, toolArgs, toolCallId) => {
+          if (boxTools != null && computerTools.some(tool => tool.name === definition.name)) {
+            return await boxTools.call(definition.name, asRecord(toolArgs) ?? {});
+          }
+          return await options.dispatchRemote("executeRoutedMcpTool", {
+            providerIdentifier: definition.providerIdentifier,
+            name: definition.name,
+            toolName: definition.toolName,
+            args: toolArgs,
+            toolCallId,
+            agentId,
+          });
+        },
+        onTextDelta,
+      } : { mcpServerUrl: bridge.url, onTextDelta });
+    }
     finally { endActivity(); await bridge?.close(); }
     await append(agentId, [{ provider, role: "assistant", content, id: assistantId, timestampMs: assistantTimestampMs }]);
     emitAssistant(content, false);
@@ -211,7 +251,7 @@ export function createCoordinatorInferenceRouter(options: {
         const [remote, local] = await Promise.all([options.dispatchRemote(method, args), load()]);
         const result = asRecord(remote);
         if (result == null || !Array.isArray(result.entries) || agentId.length === 0) return { handled: true, value: remote };
-        const entries = [...result.entries, ...(local.agents[agentId] ?? []).map(projectInferenceRouterTranscriptEntry)];
+        const entries = [...result.entries, ...(local.agents[agentId] ?? []).flatMap(entry => [...projectInferenceRouterAttachments(entry), projectInferenceRouterTranscriptEntry(entry)])];
         const limit = typeof record.limit === "number" && Number.isInteger(record.limit) && record.limit > 0 ? record.limit : 500;
         return { handled: true, value: { ...result, entries: entries.slice(-limit) } };
       }

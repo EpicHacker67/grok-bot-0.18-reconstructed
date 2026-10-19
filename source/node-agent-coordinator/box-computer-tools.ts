@@ -32,7 +32,7 @@ const DOCKER_BINARY = resolveDockerBinary();
 // runs on :1 internally), so the agent must act on :2 for what it does to be
 // what the user sees.
 
-const BOX_DISPLAY = ":2";
+const BOX_DISPLAY = process.env.SAND_DOCKER_DISPLAY ?? ":2";
 const DEFAULT_SHELL_TIMEOUT_MS = 60_000;
 const MAX_SHELL_TIMEOUT_MS = 300_000;
 const SCREENSHOT_TIMEOUT_MS = 20_000;
@@ -86,7 +86,7 @@ async function computerShell(args: Record<string, unknown>): Promise<McpToolResu
   if (command.trim().length === 0) return textResult("computer_shell requires a non-empty 'command'.", true);
   const requested = typeof args.timeout_seconds === "number" ? args.timeout_seconds * 1_000 : DEFAULT_SHELL_TIMEOUT_MS;
   const timeoutMs = Math.min(Math.max(requested, 1_000), MAX_SHELL_TIMEOUT_MS);
-  const result = await displayExec(["-w", "/home/box", "bash", "-lc", command], timeoutMs);
+  const result = await runDockerExec(["-e", `DISPLAY=${BOX_DISPLAY}`, "-w", "/home/box", LOCAL_DOCKER_BOX_CONTAINER, "bash", "-lc", command], timeoutMs);
   const body = `${result.stdout.toString()}${result.stderr.length > 0 ? `\n[stderr]\n${result.stderr}` : ""}`.trim();
   if (result.timedOut) return textResult(`Command timed out after ${Math.round(timeoutMs / 1_000)}s.\n${body}`, true);
   const header = result.code === 0 ? "" : `[exit ${result.code}]\n`;

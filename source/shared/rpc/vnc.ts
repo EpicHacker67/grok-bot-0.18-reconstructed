@@ -1,5 +1,12 @@
 export const BOX_VNC_RPC_CONTRACT_NAME = "box-vnc";
 export const BOX_VNC_METHOD_TABLE = {
+  startVideo: { args: "object" },
+  stopVideo: { args: "none" },
+  startAudio: { args: "none" },
+  readAudio: { args: "none" },
+  stopAudio: { args: "none" },
+  syncRemoteClipboard: { args: "none" },
+  stopRemoteClipboard: { args: "none" },
   readClipboard: { args: "none" },
   writeClipboard: { args: "object" },
   reportUserPresence: { args: "object" },

@@ -241,9 +241,13 @@ export function startElectronMain(deps: ElectronMainDependencies): ElectronMainR
   });
   deps.startup.bootstrapBeforeSingleInstance();
 
-  deps.app.disableHardwareAcceleration();
+  // Remote video needs hardware decoding/compositing. Retain an explicit
+  // diagnostic escape hatch for machines with a broken graphics driver.
+  if (env.MENGEL_DISABLE_GPU === "1") {
+    deps.app.disableHardwareAcceleration();
+    deps.app.commandLine.appendSwitch("disable-gpu");
+  }
   deps.app.commandLine.appendSwitch("no-sandbox");
-  deps.app.commandLine.appendSwitch("disable-gpu");
 
   const isPrimaryInstance = !deps.app.isPackaged || deps.app.requestSingleInstanceLock();
   if (!isPrimaryInstance) deps.app.quit();
