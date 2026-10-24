@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-16",
+  "status": "installed-live-comparison-pending",
+  "changes": [
+    "browser_fill_form: up to eight validated fields, optional single submission and bounded confirmation wait, one final snapshot",
+    "Compact routed snapshots with bounded ordinary text and retained controls/status; browser_read remains complete"
+  ],
+  "validation": {
+    "focusedBrowserAndProfileTests": {
+      "passed": 24,
+      "failed": 0
+    },
+    "repositoryChecks": {
+      "passed": 104,
+      "failed": 0,
+      "typechecks": "passed"
+    },
+    "packageVerification": "passed",
+    "installedAsarSha256": "b50fdf810705c35f7dcb1cf3398a1a94ea68950cc58ecc0bbea727105edd2099",
+    "snapshotRegression": "Synthetic 36-paragraph test asserts compact output is under 15% of full output while retaining the late status and button"
+  },
+  "baseline": "browser-2026-10-16.json",
+  "liveComparison": {
+    "status": "pending",
+    "reason": "Native Mac input and observations are delayed; no complete comparison prompt has been sent. Waiting for user to foreground Mengel.",
+    "fixtureStopped": true
+  },
+  "limitations": [
+    "Snapshot reduction is a component test, not measured end-to-end model latency.",
+    "No post-change live speedup or broad website success-rate claim."
+  ]
+}

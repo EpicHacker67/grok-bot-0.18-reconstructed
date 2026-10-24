@@ -234,6 +234,7 @@ export async function composeCoordinator(dependencies: ComposeCoordinatorDepende
   );
   const mainDispatch = createGatewayRequestDispatch(gatewayClient, isCoordinatorMainMethod);
   const applyPause = (paused: boolean) => {
+    inferenceRouter.setPaused(paused);
     void localExecSupervisor.setPaused(paused);
     if (paused) webauthnProvider?.stop(); else webauthnProvider?.start();
   };
@@ -249,6 +250,7 @@ export async function composeCoordinator(dependencies: ComposeCoordinatorDepende
   function settleProcess(exitCode: number): void {
     if (exitSettled) return;
     exitSettled = true;
+    inferenceRouter.dispose();
     gatewayClient.close();
     toolRelay.clear();
     localExecSupervisor.dispose();
@@ -288,6 +290,7 @@ export async function composeCoordinator(dependencies: ComposeCoordinatorDepende
   });
   void localExecSupervisor.start();
   gatewayClient.start();
+  inferenceRouter.start();
 }
 
 const invokedPath = process.argv[1];

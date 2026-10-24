@@ -65,7 +65,6 @@ interface ConnectionAttempt {
   promise: Promise<GatewayConnection>;
   state: "pending" | "settled";
   isRetired: boolean;
-  hasWaiter: boolean;
   retirement: Promise<never>;
   retire(): void;
 }
@@ -101,7 +100,6 @@ export class SandHostSupervisor {
       promise: this.options.resolveGatewayConnection(),
       state: "pending",
       isRetired: false,
-      hasWaiter: false,
       retirement,
       retire: () => { if (attempt.isRetired) return; attempt.isRetired = true; release(); }
     };
@@ -117,12 +115,15 @@ export class SandHostSupervisor {
   }
 
   private async awaitAttempt(attempt: ConnectionAttempt, signal?: AbortSignal): Promise<GatewayConnection> {
-    if (signal == null) { attempt.hasWaiter = true; return await Promise.race([attempt.promise, attempt.retirement]); }
-    if (signal.aborted) { if (!attempt.hasWaiter) attempt.retire(); throw new GatewayConnectResolveAbandonedError(); }
-    attempt.hasWaiter = true;
-    const onAbort = () => attempt.retire();
+    if (signal == null) return await Promise.race([attempt.promise, attempt.retirement]);
+    if (signal.aborted) throw new GatewayConnectResolveAbandonedError();
+    // A timed-out roster read must not cancel startup for the event stream or
+    // other callers sharing this attempt. Only invalidation retires it globally.
+    let rejectAborted!: (error: Error) => void;
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAborted = reject; });
+    const onAbort = () => rejectAborted(new GatewayConnectResolveAbandonedError());
     signal.addEventListener("abort", onAbort, { once: true });
-    try { return await Promise.race([attempt.promise, attempt.retirement]); }
+    try { return await Promise.race([attempt.promise, attempt.retirement, aborted]); }
     finally { signal.removeEventListener("abort", onAbort); }
   }
 
@@ -133,6 +134,7 @@ export class SandHostSupervisor {
   }
 
   async ensureConnection(signal?: AbortSignal): Promise<GatewayConnection> {
+    if (signal?.aborted) throw new GatewayConnectResolveAbandonedError();
     const cached = this.connection;
     if (cached != null) {
       if (!this.streamLivenessDisabled && this.options.isTransportLive?.() === true) return cached;
@@ -159,6 +161,7 @@ export class SandHostSupervisor {
         this.lastHealthyAtMs = Number.NEGATIVE_INFINITY;
         return connection;
       } catch (error) {
+        if (signal?.aborted) throw error;
         const supersedingAttempt = this.latestConnectionAttempt;
         if (attempt.healthEpoch !== this.healthEpoch) { attempt = this.getLatestAttemptForCurrentEpoch(); continue; }
         if (supersedingAttempt === attempt || supersedingAttempt == null) throw error;

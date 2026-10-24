@@ -12,7 +12,7 @@ test('Claude failure is displayed and the coordinator can accept another prompt'
   process.env.CLAUDE_CODE_PATH = process.execPath;
   try {
     const output = path.join(temporary, 'router.mjs');
-    await build({
+    await build({ banner: { js: "import { createRequire as testCreateRequire } from 'node:module'; const require = testCreateRequire(import.meta.url);" },
       entryPoints: ['source/node-agent-coordinator/inference-router.ts'], outfile: output,
       bundle: true, platform: 'node', format: 'esm',
       plugins: [{ name: 'failing-claude', setup(builder) {
@@ -66,18 +66,20 @@ test('Codex receives and executes the isolated computer tools', async () => {
             const result = await options.executeTool(computer, {command: 'hostname'}, 'call-1');
             return result.content[0].text;
           }` : `
-          export function createBoxComputerTools() { return {
+          export function createBoxComputerTools(options) { return {
             list: () => [{name: 'computer_shell', inputSchema: {type: 'object'}}],
-            call: async (name, args) => ({content: [{type: 'text', text: name + ':' + args.command}]})
+            call: async (name, args) => { await options.ensureReady(); return {content: [{type: 'text', text: name + ':' + args.command}]}; }
           }; }` }));
       } }],
     });
     await writeFile(path.join(temporary, 'settings.json'), JSON.stringify({ version: 1, inferenceProvider: 'codex', boxRuntime: 'local-docker' }));
     const { createCoordinatorInferenceRouter } = await import(pathToFileURL(output));
     const events = [];
+    const ensuredAgents = [];
     const router = createCoordinatorInferenceRouter({ dataDir: temporary,
       postEvent: (family, payload) => events.push({family, payload}),
-      dispatchRemote: async method => {
+      dispatchRemote: async (method, args) => {
+        if (method === 'ensureForeverBox') { ensuredAgents.push(args.id); return {state:'running'}; }
         assert.notEqual(method, 'executeRoutedMcpTool', 'computer tools must execute in the configured container');
         return method === 'listAgents' ? [{id: 'agent'}] : method === 'listRoutedMcpTools' ? [] : {entries: []};
       },
@@ -88,5 +90,6 @@ test('Codex receives and executes the isolated computer tools', async () => {
       assert.ok(Date.now() < deadline, 'computer tool result must reach chat');
       await new Promise(resolve => setTimeout(resolve, 25));
     }
+    assert.deepEqual(ensuredAgents,['agent'],'a computer tool must start its agent desktop without requiring the user to open the computer view');
   } finally { await rm(temporary, {recursive: true, force: true}); }
 });
