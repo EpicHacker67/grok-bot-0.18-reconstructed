@@ -13,7 +13,7 @@ test('Router models persist per provider and are used by provider requests', asy
   Object.assign(process.env, {SAND_DATA_ROOT: root, CODEX_HOME: root, CLAUDE_CODE_PATH: process.execPath, SAND_CODEX_MODEL: 'default-codex', SAND_CLAUDE_MODEL: 'default-claude', SAND_OPENROUTER_MODEL: 'vendor/default'});
   try {
     const output = path.join(root, 'module.mjs');
-    await build({ stdin: { contents: `export { SandSettingsStore } from './source/shared/node/settings/sand-settings-store.ts'; export { configuredInferenceModel, configuredInferenceEffort, runRoutedProviderText } from './source/host/extensions/inference/provider-session.ts'; export { inferenceModelCatalog } from './source/shared/node/inference-router-models.ts';`, resolveDir: process.cwd() },
+    await build({ banner: { js: "import { createRequire as testCreateRequire } from 'node:module'; const require = testCreateRequire(import.meta.url);" }, stdin: { contents: `export { SandSettingsStore } from './source/shared/node/settings/sand-settings-store.ts'; export { configuredInferenceModel, configuredInferenceEffort, runRoutedProviderText } from './source/host/extensions/inference/provider-session.ts'; export { inferenceModelCatalog } from './source/shared/node/inference-router-models.ts';`, resolveDir: process.cwd() },
       outfile: output, bundle: true, platform: 'node', format: 'esm', plugins: [{ name: 'provider-fixtures', setup(builder) {
         builder.onResolve({filter: /^@anthropic-ai\/claude-agent-sdk$/}, () => ({path: 'claude', namespace: 'fixture'}));
         builder.onResolve({filter: /codex-direct-responses\.js$/}, () => ({path: 'codex', namespace: 'fixture'}));

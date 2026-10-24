@@ -148,3 +148,75 @@ test("Codex still enforces an explicit round ceiling", async () => {
   assert.equal(requests, 2);
   assert.equal(executions, 2);
 });
+
+test('computer screenshots are image content, never base64 inside model text', async () => {
+  const { codexToolOutput } = await loadModule();
+  const data='iVBOR'.repeat(100_000);
+  for(const value of [
+    {isError:false,content:[{type:'text',text:'Screen captured'},{type:'image',mimeType:'image/png',data}]},
+    {result:{case:'success',value:{isError:false,content:[{content:{case:'image',value:{mimeType:'image/png',data}}}]}}},
+  ]) {
+    const output=codexToolOutput(value);
+    assert.ok(Array.isArray(output));
+    assert.equal(output[1].type,'input_image');
+    assert.equal(output[1].image_url,'data:image/png;base64,'+data);
+    assert.ok(output[0].text.length<500);
+    assert.doesNotMatch(output[0].text,/iVBOR/);
+    assert.match(output[0].text,/isError/);
+  }
+  const plain={content:[{type:'text',text:'hello'}]};
+  assert.equal(codexToolOutput(plain),JSON.stringify(plain));
+});
+
+test('image tool results keep their call id and reach the next model round as images', async () => {
+  const { streamCodexDirectResponses } = await loadModule();
+  let requests=0;
+  for await(const event of streamCodexDirectResponses({
+    endpoint:'https://example.invalid',model:'test',instructions:'test',input:[],
+    tools:[{name:'computer_screenshot',parameters:{type:'object'},source:{}}],
+    executeTool:async()=>({content:[{type:'image',mimeType:'image/png',data:'image-bytes'}]}),
+    fetch:async(_url,init)=>{
+      if(++requests===1)return sse([{type:'response.completed',response:{id:'first',output:[{type:'function_call',name:'computer_screenshot',call_id:'screen-1',arguments:'{}'}]}}]);
+      const result=JSON.parse(init.body).input.at(-1);
+      assert.equal(result.call_id,'screen-1');
+      assert.equal(result.output[1].type,'input_image');
+      assert.doesNotMatch(result.output[0].text,/image-bytes/);
+      return sse([{type:'response.completed',response:{id:'last',output:[]}}]);
+    },
+  })) {}
+  assert.equal(requests,2);
+});
+
+test('cancellation stops remaining tool calls and prevents another provider request', async () => {
+  const { streamCodexDirectResponses } = await loadModule();
+  const controller = new AbortController();
+  let calls = 0, requests = 0;
+  const tool = { name: 'action', parameters: { type: 'object', properties: {} }, source: {} };
+  await assert.rejects(async () => {
+    for await (const _ of streamCodexDirectResponses({
+      signal: controller.signal, endpoint: 'https://example.invalid', model: 'test', instructions: 'test', input: [], tools: [tool],
+      fetch: async (_url, init) => {
+        requests++; assert.equal(init.signal, controller.signal);
+        return sse([{ type: 'response.completed', response: { id: 'r', output: [1, 2].map(i => ({ type: 'function_call', name: 'action', call_id: `c${i}`, arguments: '{}' })) } }]);
+      },
+      executeTool: async () => { calls++; controller.abort(); throw controller.signal.reason; },
+    })) {}
+  }, /abort/i);
+  assert.equal(calls, 1);
+  assert.equal(requests, 1);
+});
+
+test('reasoning and tool argument streaming count as progress without visible answer text', async () => {
+  const { streamCodexDirectResponses } = await loadModule();
+  let progress = 0;
+  for await (const _ of streamCodexDirectResponses({
+    endpoint: 'https://example.invalid', model: 'test', instructions: 'test', input: [], onProgress: () => progress++,
+    fetch: async () => sse([
+      { type: 'heartbeat' },
+      { type: 'response.reasoning_summary_text.delta', delta: 'Thinking' },
+      { type: 'response.function_call_arguments.delta', delta: '{}' },
+      { type: 'response.completed', response: { id: 'r', output: [] } },
+    ]),
+  })) {}
+  assert.equal(progress, 3, 'transport heartbeats must not keep a stalled turn alive');
+});

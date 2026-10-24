@@ -121,6 +121,7 @@ export const SAND_GATEWAY_COMMANDS = {
   completeMcpOAuth: (api: GatewayApi, body: string) => api.completeMcpOAuth(parseCommandArgs(body)),
   requestWebAuthnCeremony: (api: GatewayApi, body: string) => api.requestWebAuthnCeremony(parseCommandArgs(body)),
   refreshMcp: (api: GatewayApi, body: string) => api.refreshMcp(parseCommandArgs(body)),
+  routedMemory: (api: GatewayApi, body: string) => api.routedMemory(parseCommandArgs(body)),
   listRoutedMcpTools: (api: GatewayApi) => api.listRoutedMcpTools(),
   executeRoutedMcpTool: (api: GatewayApi, body: string) => api.executeRoutedMcpTool(parseCommandArgs(body)),
   listBoxMcpServers: (api: GatewayApi, body: string) => api.listBoxMcpServers(parseCommandArgs(body))

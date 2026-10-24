@@ -14,6 +14,7 @@ export function createPacketAudio(pc: RTCPeerConnection, output: (target: AudioP
   let maxArrivalGapMs = 0, lastDecoded = 0, maxDecodeGapMs = 0, stale = 0;
   let decodeAgeMs = 0;
   let arrivalOffset = Infinity, playbackOffset: number | null = null;
+  let lateClock: { start: number; sample: number; min: number; max: number } | null = null;
   const nodes = new Set<AudioBufferSourceNode>();
   const pending: number[] = [];
   const apply = () => { if (gain && context) gain.gain.setValueAtTime(muted ? 0 : volume, context.currentTime); };
@@ -89,13 +90,30 @@ export function createPacketAudio(pc: RTCPeerConnection, output: (target: AudioP
     const delta = lastStamp === null ? 0 : (stamp - lastStamp + 4294967296) % 4294967296;
     const now = performance.now(), elapsed = lastReceived ? now - lastReceived : 0;
     maxArrivalGapMs = Math.max(maxArrivalGapMs, elapsed);
-    if (delta > 48000 * 5) { clear(); timestamp = 0; arrivalOffset = Infinity; }
+    if (delta > 48000 * 5) { clear(); timestamp = 0; arrivalOffset = Infinity; lateClock = null; }
     else timestamp += delta;
     lastStamp = stamp; lastSequence = sequence; lastReceived = now;
     // Estimate clock offset from the quickest packets. Allow slow clock drift
     // (up to 1 ms/s), without treating a stalled connection as a new low latency.
     arrivalOffset = Math.min(arrivalOffset + Math.min(elapsed, 1000) * 0.001, now - timestamp / 48);
-    if (now - timestamp / 48 - arrivalOffset > AUDIO_LEAD_SECONDS * 1000 - 5) { dropped++; stale++; return; }
+    const offset = now - timestamp / 48;
+    if (offset - arrivalOffset > AUDIO_LEAD_SECONDS * 1000 - 5) {
+      // A reconnect can permanently change network latency. The historical
+      // minimum would otherwise reject all sound for minutes. Rebase only after
+      // a full second of steady, real-time delivery, never on a queued burst.
+      if (!lateClock || Math.max(lateClock.max, offset) - Math.min(lateClock.min, offset) > 30) {
+        lateClock = { start: now, sample: timestamp / 48, min: offset, max: offset };
+      } else {
+        lateClock.min = Math.min(lateClock.min, offset);
+        lateClock.max = Math.max(lateClock.max, offset);
+      }
+      const elapsed = now - lateClock.start;
+      const samples = timestamp / 48 - lateClock.sample;
+      if (elapsed < 1000 || Math.abs(samples - elapsed) > 30) { dropped++; stale++; return; }
+      arrivalOffset = lateClock.min;
+      clear(); resets++;
+    }
+    lateClock = null;
     try {
       if (!context) {
         context = new AudioContext({ sampleRate: 48000, latencyHint: "interactive" });

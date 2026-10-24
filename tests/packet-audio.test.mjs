@@ -50,3 +50,15 @@ test('packet audio rejects delayed bursts and decoder backlogs, then recovers an
   f.send(24,491040);assert.equal(f.nodes.length,3);
  });
 });
+
+test('packet audio recovers from a sustained latency change without accepting a delayed burst',async()=>{
+ await fixture(f=>{
+  f.send(1,0);f.advance(10);f.send(2,480);
+  f.advance(600);
+  for(let i=3;i<43;i++)f.send(i,(i-1)*480);
+  assert.equal(f.nodes.length,2,'a queued burst must not reset the audio clock');
+  for(let i=43;i<203;i++){f.advance(10);f.send(i,(i-1)*480)}
+  assert.ok(f.nodes.length>20,'a live stream on the slower path must recover promptly');
+  assert.ok(f.player.stats().queueMs<=150,'recovery must preserve the queue bound');
+ });
+});

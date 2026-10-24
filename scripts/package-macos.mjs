@@ -75,6 +75,7 @@ await run(SYSTEM_TOOLS.plutil, ["-remove", "ElectronAsarIntegrity", infoPlist]);
 await run(SYSTEM_TOOLS.plutil, ["-remove", "CFBundleIconName", infoPlist]);
 await run(SYSTEM_TOOLS.plutil, ["-replace", "CFBundleIdentifier", "-string", reconstructedBundleId, infoPlist]);
 await run(SYSTEM_TOOLS.plutil, ["-replace", "CFBundleDisplayName", "-string", reconstructedName, infoPlist]);
+await run(SYSTEM_TOOLS.plutil, ["-replace", "NSAppleEventsUsageDescription", "-string", "Mengel looks up the contacts you name and sends the iMessages you request through your account on this Mac.", infoPlist]);
 // The backend currently emits only the `sand` auth/deep-link target. Make the
 // reconstructed bundle's claim explicit and remove inherited aliases such as
 // `grokbot`; the original bundle remains untouched and remains reference-only.

@@ -56,6 +56,6 @@ export async function stageRemoteDockerDirectory(local: string, relative: string
   if (!/^[a-zA-Z0-9/-]+$/.test(relative)) throw new Error("Invalid remote staging path.");
   const target = `${root}/${relative}`;
   await run("/usr/bin/ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, `umask 077; mkdir -p '${target}'`]);
-  await run("/usr/bin/rsync", ["-a", "--chmod=Du=rwx,Dgo=,Fu=rw,Fgo=", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=10", `${local}/`, `${host}:${target}/`]);
+  await run("/usr/bin/rsync", ["-az", "--chmod=Du=rwx,Dgo=,Fu=rw,Fgo=", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=10", `${local}/`, `${host}:${target}/`]);
   return target;
 }

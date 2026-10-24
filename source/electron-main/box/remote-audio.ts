@@ -31,7 +31,18 @@ if [ "$(cat /etc/asound.conf 2>/dev/null || true)" != "$audio_config" ]; then
   refresh_chrome_audio=1
   printf '%s\\n' "$audio_config" > /etc/asound.conf
 fi
-printf 'default-server = unix:/tmp/mengel-audio/native\nautospawn = no\n' > /etc/pulse/client.conf.d/99-mengel.conf
+# Agent-launched Chrome may run as root. Use the existing private cookie for
+# both identities; keep socket authentication and the cookie's permissions.
+pulse_config="$(cat <<'PULSE'
+default-server = unix:/tmp/mengel-audio/native
+autospawn = no
+cookie-file = /home/box/.config/pulse/cookie
+PULSE
+)"
+if [ "$(cat /etc/pulse/client.conf.d/99-mengel.conf 2>/dev/null || true)" != "$pulse_config" ]; then
+  refresh_chrome_audio=1
+  printf '%s\\n' "$pulse_config" > /etc/pulse/client.conf.d/99-mengel.conf
+fi
 if ! runuser -u box -- env PULSE_SERVER=unix:/tmp/mengel-audio/native pactl info >/dev/null 2>&1; then
   refresh_chrome_audio=1
   if ! runuser -u box -- env HOME=/home/box XDG_RUNTIME_DIR=/tmp/mengel-audio pulseaudio --daemonize=yes --exit-idle-time=-1 --log-target=file:/tmp/mengel-audio/server.log --file=/dev/null --load="module-native-protocol-unix socket=/tmp/mengel-audio/native" --load="module-null-sink sink_name=mengel_output rate=48000 channels=2 sink_properties=device.description=Mengel" --use-pid-file=yes; then
@@ -52,7 +63,7 @@ for process in pathlib.Path('/proc').iterdir():
     if not process.name.isdigit():
         continue
     try:
-        if process.stat().st_uid != box_uid or (process / 'comm').read_text().strip() != 'chrome':
+        if process.stat().st_uid not in (0, box_uid) or (process / 'comm').read_text().strip() != 'chrome':
             continue
         args = (process / 'cmdline').read_bytes().replace(bytes([0]), b' ').split()
         if b'--utility-sub-type=audio.mojom.AudioService' in args:
