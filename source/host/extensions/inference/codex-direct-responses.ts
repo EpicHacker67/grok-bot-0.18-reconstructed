@@ -31,6 +31,8 @@ export type CodexDirectOptions = {
   readonly tools?: readonly CodexDirectTool[];
   readonly executeTool?: (tool: CodexDirectTool, args: unknown, toolCallId: string) => Promise<unknown>;
   readonly maxSteps?: number;
+  readonly signal?: AbortSignal;
+  readonly onProgress?: () => void;
 };
 
 function record(value: unknown): Loose | null {
@@ -40,6 +42,33 @@ function record(value: unknown): Loose | null {
 function safeJson(value: unknown): string {
   try { return JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item) ?? "null"; }
   catch (error) { return JSON.stringify({ isError: true, error: error instanceof Error ? error.message : String(error) }); }
+}
+
+// Screenshots are visual tool output, not millions of base64 text tokens.
+// Preserve the tool's metadata and errors while lifting its images into the
+// Responses API's typed function output content.
+export function codexToolOutput(value: unknown): string | Loose[] {
+  const root = record(value);
+  const result = record(root?.result);
+  const wrapped = result?.case === "success";
+  const payload = wrapped ? record(result.value) : root;
+  if (!Array.isArray(payload?.content)) return safeJson(value);
+  const images: Loose[] = [];
+  let foundImage = false;
+  const content = payload.content.map((raw: unknown) => {
+    const item = record(raw);
+    const carrier = record(item?.content);
+    const image = item?.type === "image" ? item : carrier?.case === "image" ? record(carrier.value) : null;
+    if (image == null) return raw;
+    foundImage = true;
+    const data = typeof image.data === "string" ? image.data : image.data instanceof Uint8Array ? Buffer.from(image.data).toString("base64") : "";
+    const supported = /^image\/(png|jpeg|webp|gif)$/.test(image.mimeType) && data.length > 0;
+    if (supported) images.push({ type: "input_image", image_url: `data:${image.mimeType};base64,${data}`, detail: "auto" });
+    return { type: "text", text: supported ? `[Image ${images.length} attached]` : "[Unsupported image output omitted]" };
+  });
+  if (!foundImage) return safeJson(value);
+  const metadata = wrapped ? { ...root, result: { ...result, value: { ...payload, content } } } : { ...root, content };
+  return [{ type: "input_text", text: safeJson(metadata) }, ...images];
 }
 
 async function responseError(response: Response): Promise<Error> {
@@ -120,9 +149,11 @@ export async function* streamCodexDirectResponses(options: CodexDirectOptions): 
   let usage: CodexDirectUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 
   for (let step = 0; step < maxSteps; step += 1) {
+    options.signal?.throwIfAborted();
     const declaredTools = requestTools(options.tools);
     const response = await options.fetch(options.endpoint, {
       method: "POST",
+      ...(options.signal ? { signal: options.signal } : {}),
       headers: { "content-type": "application/json", accept: "text/event-stream", "user-agent": "grok-bot-router/1" },
       body: JSON.stringify({
         model: options.model,
@@ -142,6 +173,8 @@ export async function* streamCodexDirectResponses(options: CodexDirectOptions): 
     let completed: Loose | null = null;
     const observedOutput: Loose[] = [];
     for await (const event of sseEvents(response)) {
+      options.signal?.throwIfAborted();
+      if (["response.created", "response.completed", "response.output_item.added", "response.output_item.done", "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta"].includes(event.type)) options.onProgress?.();
       if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
         text += event.delta;
         yield { type: "text-delta", delta: event.delta };
@@ -168,6 +201,7 @@ export async function* streamCodexDirectResponses(options: CodexDirectOptions): 
 
     const results: Loose[] = [];
     for (const call of calls) {
+      options.signal?.throwIfAborted();
       const selected = toolsByName.get(call.name);
       if (selected == null) {
         results.push({ type: "function_call_output", call_id: call.call_id, output: safeJson({ isError: true, error: `Unknown Grok Bot tool: ${call.name}` }) });
@@ -177,8 +211,9 @@ export async function* streamCodexDirectResponses(options: CodexDirectOptions): 
       try { args = typeof call.arguments === "string" && call.arguments.length > 0 ? JSON.parse(call.arguments) : {}; }
       catch { results.push({ type: "function_call_output", call_id: call.call_id, output: safeJson({ isError: true, error: "Tool arguments were not valid JSON." }) }); continue; }
       try {
-        results.push({ type: "function_call_output", call_id: call.call_id, output: safeJson(await options.executeTool(selected, args, call.call_id)) });
+        results.push({ type: "function_call_output", call_id: call.call_id, output: codexToolOutput(await options.executeTool(selected, args, call.call_id)) });
       } catch (error) {
+        options.signal?.throwIfAborted();
         results.push({ type: "function_call_output", call_id: call.call_id, output: safeJson({ isError: true, error: error instanceof Error ? error.message : String(error) }) });
       }
     }

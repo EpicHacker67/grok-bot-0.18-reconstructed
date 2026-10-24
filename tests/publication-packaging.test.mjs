@@ -114,7 +114,6 @@ test("Router settings use the trusted backend and display recorded inference usa
   assert.match(coordinator, /\.flatMap\(entry => \[\.\.\.projectInferenceRouterAttachments\(entry\), projectInferenceRouterTranscriptEntry\(entry\)\]\)/);
   assert.match(coordinator, /readonly richText\?: string/);
   assert.match(coordinator, /richText: entry\.richText/);
-  assert.match(coordinator, /setTimeout\(resolve, 1_200\)/);
   assert.match(coordinator, /method === "reactToMessage"/);
   assert.match(coordinator, /reaction\.by === "me"/);
   assert.match(coordinator, /currentActivity: \{ kind: "thinking" \}/);

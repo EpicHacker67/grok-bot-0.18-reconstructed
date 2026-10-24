@@ -12,7 +12,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 async function loadModule() {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "grok-inference-router-transcript-"));
   const output = path.join(temporary, "inference-router.mjs");
-  await build({
+  await build({ banner: { js: "import { createRequire as testCreateRequire } from 'node:module'; const require = testCreateRequire(import.meta.url);" },
     entryPoints: [path.join(repoRoot, "source/node-agent-coordinator/inference-router.ts")],
     outfile: output,
     bundle: true,
@@ -72,4 +72,20 @@ test("routed transcript rejects malformed rich text carriers", async () => {
   } finally {
     await loaded.dispose();
   }
+});
+
+
+test("old generated checkpoint dumps are shortened without rewriting user messages", async () => {
+  const loaded = await loadModule();
+  try {
+    const content = 'Task paused: Task paused because the agent did not save its next step. Last checkpoint: PRIVATE INTERNAL NOTES';
+    const base = { provider: 'codex', timestampMs: 123, content };
+    const store = loaded.module.parseInferenceRouterTranscriptStore({ schemaVersion: 2, agents: { a: [
+      { ...base, role: 'assistant', id: 'task-fixture' },
+      { ...base, role: 'user', id: 't1u' },
+    ] } });
+    assert.ok(!store.agents.a[0].content.includes('PRIVATE'));
+    assert.ok(store.agents.a[0].content.includes('checkpoint is preserved'));
+    assert.equal(store.agents.a[1].content, content);
+  } finally { await loaded.dispose(); }
 });

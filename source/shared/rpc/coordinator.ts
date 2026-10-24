@@ -137,6 +137,7 @@ export const COORDINATOR_METHOD_TABLE = {
   skillsCatalog: { args: "none", reply: "array" },
   syncPluginSkills: { args: "none", reply: "array" },
   getPluginSyncStatus: { args: "none", reply: "record" },
+  routedMemory: { args: "object", reply: "record" },
   listRoutedMcpTools: { args: "none", reply: "array" },
   executeRoutedMcpTool: { args: "object", reply: "record" },
   getSkillPublishTargets: { args: "none", reply: "record" },

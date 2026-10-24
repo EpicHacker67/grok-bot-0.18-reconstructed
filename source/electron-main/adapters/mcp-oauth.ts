@@ -1,3 +1,4 @@
+import { createMessagesTools, MESSAGES_PROVIDER } from "../messages/messages-tools.js";
 import { createMcpRuntime } from "../mcp/mcp-runtime.js";
 import { registerMcpDesktopIpc, type McpDesktopDeps } from "../mcp/mcp-desktop.js";
 import type { DesktopMcpManagerFacade } from "../mcp/desktop-mcp-manager.js";
@@ -217,6 +218,17 @@ export function createProductionMcpOAuthAdapter(
         requireFunction(runtimeDeps[method], `mcpOAuth.${method}`);
       }
       const runtime = createMcpRuntime<DesktopMcpManagerFacade>(runtimeDeps);
+      const messages = createMessagesTools({
+        permission: () => context.settings.settingsStore.getLocalToolPermission(),
+        confirmSend: async ({ recipient, text }) => {
+          const electron = require("electron") as { dialog: { showMessageBox(options: { type: string; title: string; message: string; detail: string; buttons: string[]; defaultId: number; cancelId: number }): Promise<{ response: number }> } };
+          const answer = await electron.dialog.showMessageBox({
+            type: "question", title: "Send iMessage", message: `Send to ${recipient}?`,
+            detail: text, buttons: ["Cancel", "Send"], defaultId: 0, cancelId: 0,
+          });
+          return answer.response === 1;
+        },
+      });
       let desktopHandle: ReturnType<typeof registerMcpDesktopIpc> | undefined;
       let disposed = false;
       return {
@@ -233,11 +245,16 @@ export function createProductionMcpOAuthAdapter(
         },
         async listRoutedTools() {
           if (disposed) throw new Error("Electron production MCP adapter is disposed.");
-          return await (await runtime.ensureMcpManager()).listRoutedTools();
+          const remote = await (await runtime.ensureMcpManager()).listRoutedTools();
+          return [...(Array.isArray(remote) ? remote : []), ...messages.list()];
         },
         async executeRoutedTool(request) {
           if (disposed) throw new Error("Electron production MCP adapter is disposed.");
           if (typeof request !== "object" || request == null) throw new TypeError("Routed MCP execution requires a request.");
+          const local = request as { providerIdentifier?: unknown; toolName?: unknown; args?: unknown };
+          if (local.providerIdentifier === MESSAGES_PROVIDER) {
+            return await messages.call(typeof local.toolName === "string" ? local.toolName : "", local.args);
+          }
           return await (await runtime.ensureMcpManager()).executeRoutedTool(request as Parameters<DesktopMcpManagerFacade["executeRoutedTool"]>[0]);
         },
         registerDesktopIpc(ipc) {

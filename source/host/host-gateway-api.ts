@@ -1,3 +1,4 @@
+import { createRoutedMemoryService } from "./extensions/memory/routed-memory.js";
 
 import {
   parseCoordinatorAgentThreadRequest,
@@ -636,6 +637,10 @@ export function createHostGatewayApi(
         return;
       }
       await method(deps.extensions.api("mcp").management, "restart")();
+    },
+    routedMemory: (args: unknown) => {
+      const memory = deps.extensions.api("memory");
+      return createRoutedMemoryService(memory.options)(args);
     },
     listRoutedMcpTools,
     executeRoutedMcpTool,

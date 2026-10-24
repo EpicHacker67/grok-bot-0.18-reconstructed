@@ -421,9 +421,12 @@ export class CoordinatorGatewayClient {
     try {
       let handshake: { connection: GatewayConnection; reader: ReadableStreamDefaultReader<Uint8Array> };
       try {
-        handshake = await this.options.timing.connectDeadline.run(async (deadlineSignal) => {
-          const resolved = await this.resolveConnection(deadlineSignal);
-          connection = resolved;
+        // Preparing a remote container can take minutes. Its startup has its own
+        // deadlines; the short SSE deadline starts only once the host is ready.
+        const resolved = await this.resolveConnection(controller.signal);
+        controller.signal.throwIfAborted();
+        connection = resolved;
+        handshake = await this.options.timing.connectDeadline.run(async () => {
           const response = await fetch(`${resolved.baseUrl}${GATEWAY_EVENTS_PATH}`, { headers: this.requestHeaders({ accept: "text/event-stream" }, resolved), signal: controller.signal });
           if (controller.signal.aborted || attemptGeneration !== this.reconnectGeneration) {
             void response.body?.cancel().catch(() => {});
