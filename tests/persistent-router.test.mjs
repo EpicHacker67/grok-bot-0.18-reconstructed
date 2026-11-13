@@ -10,7 +10,7 @@ async function until(check) {
   const deadline = Date.now() + 12000;
   while (!await check()) { assert.ok(Date.now() < deadline, 'router did not reach expected state'); await new Promise(resolve => setTimeout(resolve, 15)); }
 }
-async function fixture(t, provider, route = 'codex') {
+async function fixture(t, provider, route = 'codex', dispatchExtra) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mengel-task-router-'));
   const key = `taskProvider${Math.random()}`;
   globalThis[key] = provider;
@@ -23,7 +23,7 @@ async function fixture(t, provider, route = 'codex') {
   const { createCoordinatorInferenceRouter } = await import(pathToFileURL(output));
   const events = [];
   let clock = 100000;
-  const router = createCoordinatorInferenceRouter({ dataDir: dir, now: () => clock, postEvent: (family, payload) => events.push({ family, payload }), dispatchRemote: async method => method === 'listAgents' ? [{ id: 'a' }] : method === 'listRoutedMcpTools' ? [] : { entries: [] } });
+  const router = createCoordinatorInferenceRouter({ dataDir: dir, now: () => clock, postEvent: (family, payload) => events.push({ family, payload }), dispatchRemote: async (method, args) => (await dispatchExtra?.(method, args)) ?? (method === 'listAgents' ? [{ id: 'a' }] : method === 'listRoutedMcpTools' ? [] : { entries: [] }) });
   t.after(async () => { router.dispose(); delete globalThis[key]; await rm(dir, { recursive: true, force: true }); });
   return { router, events, dir, advance: () => clock += 15000 };
 }
@@ -205,4 +205,31 @@ test('Claude checkpoint recovery restricts the existing MCP bridge too', async t
   await until(() => f.events.some(e => e.payload.entry?.message?.content === 'Please sign in to the fixture.'));
   assert.equal(repairs, 1);
   assert.ok(!f.events.some(e => /Internal fixture|Private reply/.test(e.payload.entry?.message?.content ?? '')));
+});
+
+
+for (const route of ['codex', 'claude-code']) test(`${route} can create and list native routines through routed tools`, async t => {
+  const routines = [];
+  const f = await fixture(t, async (_provider, _messages, options) => {
+    if (options.systemPrompt) return '{}';
+    assert.match(options.memoryContext, /Native Mengel routines are available/);
+    const invoke = async (name, args) => {
+      if (!options.mcpServerUrl) return call(options, name, args);
+      const response = await fetch(options.mcpServerUrl, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) });
+      return (await response.json()).result;
+    };
+    assert.ok(!(await invoke('routine_list', {})).isError);
+    const created = await invoke('routine_manage', { action: 'create', name: 'Paused fixture', prompt: 'Report fixture status.', schedule: '0 17 * * *', timeZone: 'America/Chicago', enabled: false });
+    assert.ok(!created.isError, JSON.stringify(created));
+    assert.equal(JSON.parse(created.content[0].text).routine.id, 'fixture');
+    return 'Fixture routine saved and paused.';
+  }, route, async (method, args) => {
+    if (method === 'getAgentAutomations') { assert.equal(args.id, 'a'); return structuredClone(routines); }
+    if (method === 'createAgentAutomation') { assert.equal(args.id, 'a'); routines.push({ id: 'fixture', ...args.spec }); return structuredClone(routines); }
+  });
+  await f.router.dispatch('sendPrompt', { agentId: 'a', prompt: 'Create a paused daily fixture routine at 5pm Chicago time.' });
+  await until(() => f.events.some(e => e.payload.entry?.message?.content === 'Fixture routine saved and paused.'));
+  assert.equal(routines.length, 1);
+  assert.equal(routines[0].trigger.schedule, 'CRON_TZ=America/Chicago 0 17 * * *');
+  assert.equal(routines[0].isEnabled, false);
 });
