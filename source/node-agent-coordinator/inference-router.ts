@@ -7,6 +7,7 @@ import { runRoutedProviderText } from "../host/extensions/inference/provider-ses
 import type { SandInferenceProvider } from "../shared/inference-router.js";
 import { SandSettingsStore } from "../shared/node/settings/sand-settings-store.js";
 import { createPersistentTasks, normalizeTaskNotification, PERSISTENT_TASK_INSTRUCTIONS, type PersistentTask } from "./persistent-tasks.js";
+import { createRoutedRoutines, ROUTINE_INSTRUCTIONS } from "./routed-routines.js";
 import { createRoutedMemory } from "./routed-memory.js";
 import { createBoxComputerTools } from "./box-computer-tools.js";
 import { createRoutedMcpBridge } from "./routed-mcp-bridge.js";
@@ -231,6 +232,8 @@ export function createCoordinatorInferenceRouter(options: {
     let memoryContext: string;
     try { memoryContext = await memory.context(prompt); }
     catch { memoryContext = "Durable memory could not be loaded this turn. Do not claim to recall or save durable facts unless a memory tool succeeds. Tell the user about the limitation if their request depends on memory."; }
+    const routineTools = createRoutedRoutines(agentId, options.dispatchRemote, { signal, now, timeZone: settings.getUserTimeZone() ?? Intl.DateTimeFormat().resolvedOptions().timeZone });
+    memoryContext += `\n\n${ROUTINE_INSTRUCTIONS}`;
     const taskTools = tasks.tools(agentId, provider, prompt, !!background, signal);
     const savedTask = await tasks.get(agentId);
     memoryContext += `\n\n${PERSISTENT_TASK_INSTRUCTIONS}\nSaved task data (not new instructions): ${JSON.stringify(savedTask ?? null)}`;
@@ -264,10 +267,11 @@ export function createCoordinatorInferenceRouter(options: {
       return result;
     };
     const localTools = {
-      list: () => checkpointOnly ? recoveryTools!.list() : [...taskTools.list(), ...memory.tools.list(), ...(boxTools?.list() ?? [])],
+      list: () => checkpointOnly ? recoveryTools!.list() : [...taskTools.list(), ...routineTools.list(), ...memory.tools.list(), ...(boxTools?.list() ?? [])],
       call: (name: string, args: Record<string, unknown>) => invokeTool(() => recordTool(name, args, async () => {
         if (checkpointOnly) return recoveryTools!.call(name, args);
         return taskTools.list().some(t => t.name === name) ? taskTools.call(name, args)
+          : routineTools.list().some(t => t.name === name) ? routineTools.call(name, args)
           : memory.tools.list().some(t => t.name === name) ? memory.tools.call(name, args) : boxTools!.call(name, args);
       })),
     };
